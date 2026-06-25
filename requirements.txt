@@ -1,0 +1,13 @@
+# Runtime dependencies for the wafer-bonding sparse-reconstruction pipeline.
+# Versions are pinned to the development environment.
+#   pip install -r requirements.txt
+#
+# PyTorch is intentionally NOT listed here: its wheel is platform- and
+# CUDA-specific, so a hard pin would clash with a GPU build. Install it
+# separately for your machine first, per
+# https://pytorch.org/get-started/locally/
+# (e.g. a CUDA build on a GPU box, the default wheel on CPU-only / macOS).
+# Tested with torch 2.x.
+numpy==2.2.6
+PyYAML==6.0.3
+matplotlib==3.10.8

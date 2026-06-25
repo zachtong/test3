@@ -1,0 +1,55 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb_checkpoints
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Environment
+.env
+.env.*
+venv/
+.venv/
+
+# Training outputs (regenerable)
+outputs/
+
+# Generated presentation figures (regenerable from runs)
+presentation/*/figures/
+*.gif
+
+# Prior exploration archive (large, not tracked)
+archive/
+
+# Large binary artifacts
+*.npy
+*.npz
+*.pt
+*.pth
+*.ckpt
+
+# Local logs
+*.tmp
+*.log
+
+# Local-only notes and scratch (not part of the published repo)
+HANDOFF.md
+IMG_*.jpg
+IMG_*.jpeg
+
+# wafer_app generated artifacts
+wafer_app/out/

@@ -1,0 +1,59 @@
+# 3D POD + BiTCN default config.
+#
+# Sensor positions are (r, theta_deg) pairs: r in [0, 1] (fraction of the
+# wafer radius), theta in degrees CCW from +x. The example below puts
+# n=4 sensors at the edge (r=1.0) on the X / Y / D=45 / -D=-45 axes --
+# adapt to whatever the rig actually supports.
+#
+# The wafer is a unit disk in normalized coordinates (x, y in [-1, 1] with
+# the circle r=1 the wafer edge). Set data.npz_dir before training; the
+# 3D loader is a stub until the NPZ schema is wired up.
+
+data:
+  npz_dir: "REPLACE_WITH/dataset3d_npz"
+  nx: 128
+  ny: 128
+  nt: 300
+  x_end: 1.0
+  y_end: 1.0
+  t_end: 1.0
+  train_frac: 0.80
+  seed: 7
+  limit: null
+
+pod:
+  k: 8
+
+sensors:
+  n: 4
+  strategy: custom
+  positions:
+    - [1.0, 0.0]      # +X edge
+    - [1.0, 90.0]     # +Y edge
+    - [1.0, 45.0]     # +D edge
+    - [1.0, -45.0]    # -D edge
+
+model:
+  arch: bitcn
+  channels: 64
+  kernel: 3
+  dilations: [1, 2, 4, 8, 16, 32, 64]
+  dropout: 0.05
+  causal: false
+
+train:
+  epochs: 200
+  batch_size: 32
+  lr_init: 0.001
+  lr_final: 0.00001
+  lr_schedule: cosine
+  weight_decay: 0.0
+  val_frac: 0.10
+  sensor_noise: 0.0
+  grad_clip: 1.0
+  weight_scheme: sigma
+  print_every: 25
+
+seeds: [7, 17, 27]
+output_dir: outputs
+tag: real3d
