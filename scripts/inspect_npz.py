@@ -455,6 +455,14 @@ def main() -> int:
 
     for i, p in enumerate(files):
         verbose = i < args.schema_verbose
+        # preflight is the authoritative "will the loader accept this"
+        # decision; it strictly extends validate_invariants (adds
+        # sample_step_index range + sample_tReal monotonicity), so a
+        # file can fail preflight while still passing the verbose-mode
+        # invariant report. Run preflight in BOTH modes and let it
+        # govern good_set / bad_files; verbose mode adds the richer
+        # validate_invariants per-error spelling on top.
+        ok, reason = preflight_npz(p)
         if verbose:
             summary = report_schema(p)
             errs, warns = validate_invariants(p, summary)
@@ -463,22 +471,23 @@ def main() -> int:
             for e in errs:
                 print(f"  ERROR: {e}")
             warnings_count += len(warns)
-            if errs:
-                bad_files.append((p, errs))
-            # Also call preflight to keep good_set in sync with what the
-            # loader will accept. Cheap (already-cached file in os cache).
-            ok, _ = preflight_npz(p)
-            if ok:
-                good_set.append(p)
+            # Prefer invariant errors if any (more specific), otherwise
+            # fall back to the preflight reason. Either way, if preflight
+            # said "no", the file MUST land in bad_files.
+            reasons = list(errs)
+            if not ok and not any(reason and reason in e for e in reasons):
+                reasons.append(f"preflight: {reason}")
+                print(f"  ERROR: preflight: {reason}")
+            if reasons:
+                bad_files.append((p, reasons))
         else:
-            # Compact mode: one-liner per file. preflight only.
-            ok, reason = preflight_npz(p)
             if ok:
-                good_set.append(p)
                 print(f"  {p.name}: OK")
             else:
                 bad_files.append((p, [reason or "preflight failed"]))
                 print(f"  {p.name}: BAD -- {reason}")
+        if ok:
+            good_set.append(p)
 
     print(f"\n=== schema scan summary ===")
     print(f"  total files: {len(files)}")
