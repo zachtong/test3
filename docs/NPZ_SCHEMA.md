@@ -80,8 +80,12 @@ static within a step and shared by all `T_i` time points of that step.
 The corrected z displacement is computed during conversion using the COMSOL
 shell variables: `displacement_z_corrected = shell.umz + 0.5 * shell.d *
 arz`. This formula matches the 2D pipeline's correction and bakes the
-mid-plane shell offset into the saved field, so no separate rotation or
-thickness storage is required to reproduce it.
+mid-plane shell offset into the saved field. Note: even though the
+correction is precomputed and the loader does NOT need `shell.d` to
+reproduce it, `thickness_lower` / `thickness_upper` are still written to
+the NPZ. They serve as provenance (auditing the correction) and leave a
+hook open for any future model that wants the raw thickness as a separate
+feature; the loader simply does not read them.
 
 ### 2.2 Global sample-index arrays (no step prefix)
 
@@ -130,20 +134,37 @@ without having to walk the step hierarchy.
 | `array_float_dtype`         | string      | `"float32"`                                                                               |
 | `time_dtype`                | string      | `"float64"`                                                                               |
 
-### 2.4 COMSOL physical metadata (scalar arrays, when available)
+### 2.4 COMSOL physical metadata
+
+Presence policy splits into two groups. The first group is ALWAYS written
+to disk -- if the value is unavailable in the source JSON the converter
+falls back to a NaN (for floats) or an empty string (for `modelName`), so
+the key is present but the value flags "missing". The loader can rely on
+the key existing and must defensively handle NaN.
 
 | key                  | dtype                   | meaning                                                                   |
 |----------------------|-------------------------|---------------------------------------------------------------------------|
-| `contactTime`        | float64                 | physical time when initial contact is established                         |
-| `releaseTime_LW`     | float64                 | physical time when the lower wafer is released                            |
-| `releaseTime_UW`     | float64                 | physical time when the upper wafer is released                            |
-| `hGap`               | float64                 | nominal initial gap between wafers                                        |
-| `modelName`          | string                  | COMSOL model name                                                         |
-| `allParams_json`     | string                  | full original `allParams` from COMSOL, serialized as JSON text            |
-| `expr`               | string array shape (7,) | typically `["shell.umx","shell.umy","shell.umz","arx","ary","arz","shell.d"]` |
+| `contactTime`        | float64                 | physical time when initial contact is established; NaN if missing         |
+| `releaseTime_LW`     | float64                 | physical time when the lower wafer is released; NaN if missing            |
+| `releaseTime_UW`     | float64                 | physical time when the upper wafer is released; NaN if missing            |
+| `hGap`               | float64                 | nominal initial gap between wafers; NaN if missing                        |
+| `modelName`          | string                  | COMSOL model name; empty string if missing                                |
+
+The second group is genuinely conditional and may be absent from a given
+NPZ. The loader uses `_get_optional` so a missing key is treated as
+"feature not provided".
+
+| key                  | dtype                   | meaning                                                                   |
+|----------------------|-------------------------|---------------------------------------------------------------------------|
+| `allParams_json`     | string                  | full original `allParams` from COMSOL, serialized as JSON text; optional  |
+| `expr`               | string array shape (7,) | expression list read from the FIRST successfully converted step; usually `["shell.umx","shell.umy","shell.umz","arx","ary","arz","shell.d"]` |
 
 The minimal converted field set depends only on `shell.umz`, `arz`, and
 `shell.d`. Extra expressions in `expr` may be present and are ignored.
+`expr` is captured ONCE from the first converted step and not re-checked
+against later steps -- if the source JSON were inconsistent (different
+expression set across steps, which is not expected) only the first step's
+list would be recorded here.
 
 ## 3. Loader access pattern
 
@@ -159,8 +180,21 @@ t_real       = data["sample_tReal"][k]                                  # scalar
 b_front      = data["sample_bonding_front"][k]                          # scalar
 ```
 
-`num_samples`, `sample_*`, and `step_*` scalars are 0-d int64 / float64
-arrays; cast with `int(...)` or `float(...)` before use.
+Dtype-and-shape quick-reference for the index/scalar keys (important: only
+true scalars are 0-d):
+
+- `num_samples` and every file-level metadata scalar (e.g.
+  `num_wafer_steps`, `last_step_removed`, `contactTime`) are 0-d arrays
+  -- cast with `int(...)`, `float(...)`, or `bool(...)`.
+- All `sample_*` arrays are 1-d shape `(S,)`. Index with `[k]` to get the
+  k-th sample's value; the value itself is a 0-d numpy scalar.
+- Per-step SCALAR metadata (`step_{i:04d}_num_time_points`,
+  `step_{i:04d}_num_points`, `step_{i:04d}_num_lower_points`,
+  `step_{i:04d}_num_upper_points`, `step_{i:04d}_z_min`,
+  `step_{i:04d}_z_max`) are 0-d arrays.
+- All OTHER `step_{i:04d}_*` keys -- coordinates, displacement,
+  thickness, bonding_front, tReal -- are multi-dimensional arrays with
+  the shapes given in section 2.1; they are NOT 0-d.
 
 ## 4. What the loader uses, what it ignores
 
