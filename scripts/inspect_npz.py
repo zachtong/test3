@@ -449,6 +449,11 @@ def main() -> int:
     ap.add_argument("--out-dir", default=None,
                     help="where to write the figures (default: "
                     "<npz_dir>/../inspect_out)")
+    ap.add_argument("--drop-first-steps", type=int, default=0,
+                    help="match the loader's drop_first_steps for Mode 2: "
+                    "discard the first N waferData steps' samples before "
+                    "canonicalize so the snapshot reflects what training "
+                    "will actually see. Default 0 = no trim.")
     args = ap.parse_args()
 
     folder = Path(args.npz_dir).expanduser().resolve()
@@ -533,7 +538,8 @@ def main() -> int:
 
     pick = good_set[: args.n]
     print(f"\n=== MODE 2: loader test on {len(pick)} good NPZ(s) "
-          f"(nx={args.nx}, ny={args.ny}, nt={args.nt}) ===")
+          f"(nx={args.nx}, ny={args.ny}, nt={args.nt}, "
+          f"drop_first_steps={args.drop_first_steps}) ===")
     for p in pick:
         print(f"  selected: {p.name}")
     from data.loader import _build_one                           # noqa: E402
@@ -545,7 +551,8 @@ def main() -> int:
     t0 = time.time()
     try:
         for p in pick:
-            f, params = _build_one((str(p), x_canon, y_canon, t_canon))
+            f, params = _build_one((str(p), x_canon, y_canon, t_canon,
+                                    args.drop_first_steps))
             params["basename"] = p.name
             sims.append(Simulation(f=f, params=params))
     except Exception as e:

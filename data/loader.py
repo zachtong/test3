@@ -409,7 +409,16 @@ def _build_one(args):
     canonicalize, recovers a sane native sample density in time, and
     keeps the loader cache key separate from the no-drop case.
     """
-    (path_str, x_canon, y_canon, t_canon, drop_first_steps) = args
+    # Accept the legacy 4-tuple (no drop_first_steps) for backward
+    # compatibility with callers that haven't been updated yet -- the
+    # CLI diagnostic scripts and any external user code may still pass
+    # the old shape. Default drop_first_steps=0 keeps the no-trim
+    # behaviour.
+    if len(args) == 4:
+        path_str, x_canon, y_canon, t_canon = args
+        drop_first_steps = 0
+    else:
+        path_str, x_canon, y_canon, t_canon, drop_first_steps = args
     p = Path(path_str)
     nx, ny, nt = x_canon.size, y_canon.size, t_canon.size
 

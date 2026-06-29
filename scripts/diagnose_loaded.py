@@ -59,9 +59,10 @@ def _pick_one(folder: Path) -> Path | None:
     return None
 
 
-def diagnose(path: Path, nx: int, ny: int, nt: int) -> int:
+def diagnose(path: Path, nx: int, ny: int, nt: int,
+             drop_first_steps: int = 0) -> int:
     print(f"\n=== loaded-field probe: {path.name} (nx={nx}, ny={ny}, "
-          f"nt={nt}) ===")
+          f"nt={nt}, drop_first_steps={drop_first_steps}) ===")
 
     # Stage the single NPZ into a temp folder so load_dataset's
     # folder-based interface works without caching to the user's tree.
@@ -70,7 +71,8 @@ def diagnose(path: Path, nx: int, ny: int, nt: int) -> int:
         shutil.copy(path, staged)
         x_canon, y_canon, sims = load_dataset(
             Path(td), nx=nx, ny=ny, nt=nt,
-            cache=False, workers=1)
+            cache=False, workers=1,
+            drop_first_steps=drop_first_steps)
     if not sims:
         print("load_dataset returned 0 sims -- preflight rejected the file?")
         return 1
@@ -170,6 +172,10 @@ def main() -> int:
     ap.add_argument("--nx", type=int, default=128)
     ap.add_argument("--ny", type=int, default=128)
     ap.add_argument("--nt", type=int, default=300)
+    ap.add_argument("--drop-first-steps", type=int, default=0,
+                    help="forward to load_dataset's drop_first_steps so "
+                    "the probe reflects the same trim that training will "
+                    "apply. Default 0 = no trim.")
     args = ap.parse_args()
 
     p = Path(args.path).expanduser().resolve()
@@ -179,9 +185,11 @@ def main() -> int:
             print(f"no NPZ in {p} passes preflight")
             return 1
         print(f"folder mode: picked {picked.name}")
-        return diagnose(picked, args.nx, args.ny, args.nt)
+        return diagnose(picked, args.nx, args.ny, args.nt,
+                        drop_first_steps=args.drop_first_steps)
     if p.is_file() and p.suffix == ".npz":
-        return diagnose(p, args.nx, args.ny, args.nt)
+        return diagnose(p, args.nx, args.ny, args.nt,
+                        drop_first_steps=args.drop_first_steps)
     print(f"error: {p} is not a folder or .npz file", file=sys.stderr)
     return 2
 
