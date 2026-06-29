@@ -72,6 +72,11 @@ class DataConfig:
     seed: int = 7
     npz_dir: str | None = None
     limit: int | None = None
+    # Parallel-build worker cap for the loader's first-time cache build.
+    # None = loader's auto default (cpu_count - 2). Override e.g. on a
+    # 64-core server where the unbounded default oversubscribes BLAS
+    # threads and slows things down: --data.workers 32 is often best.
+    workers: int | None = None
     oversample_tmax_above: float | None = None
     oversample_factor: int = 1
     oversample_source_substring: str | None = None
