@@ -100,6 +100,19 @@ def test_cache_roundtrip(fixture_folder):
         assert a.params["basename"] == b.params["basename"]
 
 
+def test_trim_last_step_metadata(fixture_folder):
+    """Loader exposes the converter's trim-last-step bookkeeping in params."""
+    _, _, sims = load_dataset(fixture_folder, nx=16, ny=16, nt=8,
+                              cache=False, workers=1)
+    for s in sims:
+        assert s.params["last_step_removed"] is True
+        # original > converted by exactly 1 in the mock; real converter same.
+        assert (s.params["num_original_wafer_steps"]
+                == s.params["num_wafer_steps"] + 1)
+        assert "step_metadata_json" in s.params
+        assert "skipped_steps_json" in s.params
+
+
 def test_quarter_validation(tmp_path):
     """A sim with a negative-x native coord must abort the load."""
     folder = tmp_path / "bad_quadrant"

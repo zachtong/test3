@@ -59,7 +59,13 @@ _QUARTER_TOL = 1e-6   # native x/y allowed slightly negative due to float roundo
 _OPTIONAL_PHYSICAL_KEYS = ("contactTime", "releaseTime_LW",
                            "releaseTime_UW", "hGap")
 _OPTIONAL_STRING_KEYS = ("source_json", "source_json_name", "converter_version",
-                         "modelName", "z_correction_formula")
+                         "modelName", "z_correction_formula",
+                         "step_metadata_json", "skipped_steps_json")
+# Trim-last-step bookkeeping: the converter always drops the final
+# waferData step before writing. These keys make that recoverable.
+_OPTIONAL_INT_KEYS = ("num_original_wafer_steps", "num_valid_wafer_steps",
+                      "skipped_step_count")
+_OPTIONAL_BOOL_KEYS = ("last_step_removed",)
 
 
 def _is_compressed_npz(path) -> bool:
@@ -197,6 +203,14 @@ def _build_one(args):
             v = _get_optional(z, k)
             if v is not None:
                 params[k] = str(v)
+        for k in _OPTIONAL_INT_KEYS:
+            v = _get_optional(z, k)
+            if v is not None:
+                params[k] = int(v)
+        for k in _OPTIONAL_BOOL_KEYS:
+            v = _get_optional(z, k)
+            if v is not None:
+                params[k] = bool(v)
         if "num_wafer_steps" in z.files:
             params["num_wafer_steps"] = int(z["num_wafer_steps"])
 

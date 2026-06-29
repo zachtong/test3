@@ -134,8 +134,14 @@ def make_mock_3d_npz(out_path: Path,
 
     payload["num_samples"] = np.int64(S)
     payload["num_wafer_steps"] = np.int64(n_steps)
+    # Mirror the real converter: claim the source JSON had one more step
+    # than what was converted (trim-last-step invariant).
+    payload["num_original_wafer_steps"] = np.int64(n_steps + 1)
+    payload["last_step_removed"] = np.bool_(True)
     payload["num_valid_wafer_steps"] = np.int64(n_steps)
     payload["skipped_step_count"] = np.int64(0)
+    payload["step_metadata_json"] = np.array("[]", dtype=object)
+    payload["skipped_steps_json"] = np.array("[]", dtype=object)
     payload["source_json"] = np.array(str(out_path), dtype=object)
     payload["source_json_name"] = np.array(out_path.name, dtype=object)
     payload["json_file_size_bytes"] = np.int64(0)

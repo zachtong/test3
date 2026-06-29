@@ -22,11 +22,30 @@ of the claims below, this file must be updated in the same commit.
   upper wafer is the set where z equals z_max. Counts on each side
   (N_lower_i and N_upper_i for step i) generally differ from each other and
   from step to step.
-- Every time point inside every step is treated as one machine-learning
-  sample. With T_i time points in step i, the total number of samples per
-  NPZ is S = sum_i T_i. A pair of sample-level index arrays maps every
-  global sample index k back to the (step_idx, time_idx) pair that locates
-  its data in the step-wise arrays.
+- Every time point inside every CONVERTED step is treated as one
+  machine-learning sample. With T_i time points in converted step i, the
+  total number of samples per NPZ is S = sum_i T_i (summed only over
+  converted steps, see next bullet). A pair of sample-level index arrays
+  maps every global sample index k back to the (step_idx, time_idx) pair
+  that locates its data in the step-wise arrays.
+- The converter ALWAYS drops the final original waferData step before
+  conversion (the trailing step often holds a partial / restart frame that
+  would distort the trajectory). Three keys make this explicit and
+  recoverable:
+    * `num_original_wafer_steps` is the source JSON's step count BEFORE
+      removal.
+    * `num_wafer_steps` is the post-removal converted count and is the
+      ONLY authoritative step count for the loader; valid step indices
+      run `[0, num_wafer_steps - 1]`.
+    * `last_step_removed` is a bool scalar, always True under the current
+      converter; if a future converter ever keeps the final step it must
+      flip this to False.
+  Loader code must treat `num_wafer_steps` -- not
+  `num_original_wafer_steps` -- as the upper bound on `sample_step_index`
+  and on the set of `step_{i:04d}_*` prefixes that exist on disk. This
+  invariant also matches the 2D converter's "drop the trailing step"
+  behavior (see `data/json_to_npz_converter.py` in
+  `wafer_bonding_sparse_recon`).
 
 ## 2. Field inventory
 
@@ -85,27 +104,31 @@ without having to walk the step hierarchy.
 
 ### 2.3 File-level metadata (scalar arrays)
 
-| key                       | dtype       | meaning                                                       |
-|---------------------------|-------------|---------------------------------------------------------------|
-| `num_samples`             | int64       | S                                                             |
-| `num_wafer_steps`         | int64       | number of original waferData steps                            |
-| `num_valid_wafer_steps`   | int64       | number of successfully converted steps                        |
-| `skipped_step_count`      | int64       | normally 0                                                    |
-| `source_json`             | string      | provenance: full source JSON path                             |
-| `source_json_name`        | string      | provenance: source JSON basename                              |
-| `json_file_size_bytes`    | int64       | provenance                                                    |
-| `converter_version`       | string      | converter version tag                                         |
-| `minimal_fields`          | bool        | true if only the minimum field set was written                |
-| `repaired_or_not`         | bool        | always False under the current "skip, do not repair" policy   |
-| `invalid_json_policy`     | string      | `"skip_no_repair"`                                            |
-| `complete_json_required`  | bool        | True                                                          |
-| `coordinate_system`       | string      | `"cartesian_3d"`                                              |
-| `coordinate_layout`       | string      | `"(3,N)"`                                                     |
-| `wafer_split_mode`        | string      | `"z_min_z_max"`                                               |
-| `z_correction_mode`       | string      | `"shell_umz_plus_half_thickness_arz"`                         |
-| `z_correction_formula`    | string      | `"displacement_z_corrected = shell.umz + 0.5 * shell.d * arz"`|
-| `array_float_dtype`       | string      | `"float32"`                                                   |
-| `time_dtype`              | string      | `"float64"`                                                   |
+| key                         | dtype       | meaning                                                                                  |
+|-----------------------------|-------------|------------------------------------------------------------------------------------------|
+| `num_samples`               | int64       | S = total ML samples = `sum_i T_i` over the converted steps only                         |
+| `num_wafer_steps`           | int64       | converted (post-removal) step count; the authoritative upper bound on `sample_step_index`|
+| `num_original_wafer_steps`  | int64       | source JSON's step count BEFORE the converter dropped the trailing step                  |
+| `num_valid_wafer_steps`     | int64       | converted steps that came through without internal failures                              |
+| `last_step_removed`         | bool        | always True under the current converter; True iff `num_wafer_steps < num_original_wafer_steps` |
+| `skipped_step_count`        | int64       | normally 0                                                                                |
+| `step_metadata_json`        | string      | per-converted-step metadata serialized as JSON text (provenance / debugging)             |
+| `skipped_steps_json`        | string      | per-skipped-step record serialized as JSON text (empty / `"[]"` when none were skipped)  |
+| `source_json`               | string      | provenance: full source JSON path                                                         |
+| `source_json_name`          | string      | provenance: source JSON basename                                                          |
+| `json_file_size_bytes`      | int64       | provenance                                                                                |
+| `converter_version`         | string      | converter version tag                                                                     |
+| `minimal_fields`            | bool        | true if only the minimum field set was written                                            |
+| `repaired_or_not`           | bool        | always False under the current "skip, do not repair" policy                               |
+| `invalid_json_policy`       | string      | `"skip_no_repair"`                                                                        |
+| `complete_json_required`    | bool        | True                                                                                      |
+| `coordinate_system`         | string      | `"cartesian_3d"`                                                                          |
+| `coordinate_layout`         | string      | `"(3,N)"`                                                                                 |
+| `wafer_split_mode`          | string      | `"z_min_z_max"`                                                                           |
+| `z_correction_mode`         | string      | `"shell_umz_plus_half_thickness_arz"`                                                     |
+| `z_correction_formula`      | string      | `"displacement_z_corrected = shell.umz + 0.5 * shell.d * arz"`                            |
+| `array_float_dtype`         | string      | `"float32"`                                                                               |
+| `time_dtype`                | string      | `"float64"`                                                                               |
 
 ### 2.4 COMSOL physical metadata (scalar arrays, when available)
 
@@ -158,7 +181,9 @@ deliberately reads a strict subset.
 - `sample_bonding_front` (kept for future label / anomaly use).
 - `tReal` raw values, used to verify monotonicity and to drive time
   normalization.
-- All file-level provenance (`source_json`, `converter_version`, etc.).
+- All file-level provenance (`source_json`, `converter_version`,
+  `num_original_wafer_steps`, `num_wafer_steps`, `last_step_removed`,
+  `step_metadata_json`, `skipped_steps_json`, etc.).
 - All COMSOL physical metadata when present (`contactTime`,
   `releaseTime_LW`, `releaseTime_UW`, `hGap`, `modelName`,
   `allParams_json`, `expr`).
@@ -238,7 +263,8 @@ When reading one NPZ, the loader must:
 
 - Treat `num_samples` as the authoritative S; cross-check that
   `sample_step_index.shape == (S,)` and that the maximum step index is
-  `< num_wafer_steps`.
+  `< num_wafer_steps` (the converted count, NOT
+  `num_original_wafer_steps`).
 - For each step encountered: read `coordinates_upper`, verify
   `coords.shape[1] == num_upper_points`, and that all points satisfy
   `x >= 0` and `y >= 0` within a small tolerance. A negative coordinate
