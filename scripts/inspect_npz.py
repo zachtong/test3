@@ -381,7 +381,15 @@ def render_sim_panel(sim_f: np.ndarray, x_canon: np.ndarray,
                      y_canon: np.ndarray, sensor_xy: np.ndarray,
                      title: str, out_path: Path,
                      value_scale: float = 1.0e6) -> None:
-    """Three-snapshot (t = first / middle / last) heatmap with sensors."""
+    """Three-snapshot (t = first / middle / last) heatmap with sensors.
+
+    Per-frame colour scale: each subplot gets its own vmin/vmax so a
+    big late-time peak does not visually squash the early/mid frames
+    into uniform black. The cost is that the three panels are no
+    longer directly comparable in absolute amplitude -- the per-frame
+    title prints the magnitude range so the reader still sees the
+    relative scales. Each subplot also gets its own colourbar.
+    """
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
@@ -389,20 +397,31 @@ def render_sim_panel(sim_f: np.ndarray, x_canon: np.ndarray,
     t_idx = [0, nt // 2, nt - 1]
     ext = [x_canon[0], x_canon[-1], y_canon[0], y_canon[-1]]
     F = sim_f * value_scale
-    vmin = float(np.nanmin(F))
-    vmax = float(np.nanmax(F))
-    fig, axes = plt.subplots(1, 3, figsize=(11, 3.6),
+    fig, axes = plt.subplots(1, 3, figsize=(13, 4.0),
                              constrained_layout=True)
     for ax, k in zip(axes, t_idx):
-        im = ax.imshow(F[..., k].T, origin="lower", aspect="equal",
-                       extent=ext, vmin=vmin, vmax=vmax, cmap="viridis")
-        ax.set_title(f"t-idx {k}/{nt - 1}")
+        slice_ = F[..., k].T
+        finite = slice_[np.isfinite(slice_)]
+        if finite.size == 0 or finite.max() == finite.min():
+            vmin_k, vmax_k = -1.0, 1.0
+        else:
+            # 1st / 99th percentile clipping keeps a single off-disk
+            # outlier or zero-mask cell from owning the colour scale.
+            vmin_k = float(np.percentile(finite, 1))
+            vmax_k = float(np.percentile(finite, 99))
+            if vmin_k == vmax_k:
+                vmin_k, vmax_k = finite.min(), finite.max()
+        im = ax.imshow(slice_, origin="lower", aspect="equal",
+                       extent=ext, vmin=vmin_k, vmax=vmax_k, cmap="viridis")
+        amp = float(np.abs(finite).max()) if finite.size else 0.0
+        ax.set_title(f"t-idx {k}/{nt - 1}  |peak|={amp:.2e}")
         ax.set_xlabel("x")
         ax.scatter(sensor_xy[:, 0], sensor_xy[:, 1], s=24,
                    marker="x", c="red", linewidths=1.5)
+        fig.colorbar(im, ax=ax, shrink=0.85)
     axes[0].set_ylabel("y")
-    fig.suptitle(title)
-    fig.colorbar(im, ax=axes[:], shrink=0.85, label=f"u_z * {value_scale:g}")
+    fig.suptitle(f"{title}  (per-frame colour scale; "
+                 f"u_z * {value_scale:g})")
     out_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out_path, dpi=130, bbox_inches="tight")
     plt.close(fig)
