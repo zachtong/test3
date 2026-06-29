@@ -1,20 +1,37 @@
 """Load converted 3D NPZ simulations onto the canonical Cartesian grid.
 
-STUB. The NPZ schema for the 3D export is not finalized yet, so the
-per-file canonicalization (`_canonicalize`) and the field read (`_read_npz`)
-both raise `NotImplementedError`. The pieces that ARE in place are the
-generic ones, ported from the validated 2D loader:
+Per-NPZ layout: step-wise (each waferData step has its own static mesh and
+time-dependent fields; the mesh adapts across steps). Per sample (= one time
+point of one step) the loader takes the upper-wafer (x, y) point cloud and
+the corresponding `displacement_z_corrected_upper` slice, interpolates onto
+the canonical quarter-disk Cartesian grid, then time-resamples the stack
+onto a uniform time axis.
 
-  - Per-file parallel build (`ProcessPoolExecutor`)
-  - Streaming preallocated result stack (no end-of-build np.stack stall)
-  - Atomic uncompressed cache write (.tmp -> rename) with stale .tmp sweep
-  - CRC-free bulk cache read via fromfile + npz local-header parse
-  - Cache validity keyed on (nx, ny, nt) + the source-filename set
-  - Disk-full-resilient cache write: warn, drop .tmp, continue in-memory
+See docs/NPZ_SCHEMA.md for the full schema and field policy.
 
-When the NPZ schema is fixed, fill `_read_npz` (member keys) and
-`_canonicalize` (resample the native field onto (nx_canon, ny_canon,
-nt_canon)) -- the rest of the pipeline already works.
+Pipeline per sim:
+  1. Open NPZ, read sample index arrays + tReal + bonding_front + metadata.
+  2. Group sample indices by step_idx.
+  3. For each unique step:
+     a. Read coordinates_upper[:2, :].T -- the native (x, y) point cloud
+        (validated to lie in the first quadrant).
+     b. Build one scipy.spatial.Delaunay over those points and precompute
+        the barycentric weights of every canonical grid query point. Two
+        outputs per step: a (Nx*Ny, 3) vertex-index array and a
+        (Nx*Ny, 3) weight array.
+     c. For each sample in the step, gather displacement values at the
+        three vertices, dot with the weights, mask off-hull (-> 0), and
+        reshape to (Nx, Ny). The Delaunay + weights are paid once per
+        step, not once per sample.
+  4. Stack per-sample (Nx, Ny) into f_stack (S, Nx, Ny).
+  5. Validate tReal monotonicity (allow exact duplicates at step boundaries
+     but abort on a backward jump > one median dt; same rule as 2D).
+  6. Normalize sample times to [0, 1] and linearly resample each pixel's
+     time trace onto t_canon (Nt,).
+  7. Return f (Nx, Ny, Nt) float32 + a params dict.
+
+Cache layer: identical framework to 2D (parallel build, atomic write,
+disk-full resilience, stale .tmp sweep, CRC-free bulk read).
 """
 
 from __future__ import annotations
@@ -25,12 +42,24 @@ from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
 import numpy as np
+from scipy.spatial import Delaunay
 
 from core.simulation import Simulation
-from core.grid import canonical_grid
+from core.grid import canonical_grid, disk_mask
 
 _CACHE_PREFIX = "_loader_cache_"
 _PARALLEL_MIN = 32
+_QUARTER_TOL = 1e-6   # native x/y allowed slightly negative due to float roundoff
+
+
+# Per-sim metadata pulled from file-level / COMSOL-level NPZ keys; copied
+# into Simulation.params for downstream provenance and conditional-feature
+# experiments. Keys that the NPZ may or may not contain (older / minimal
+# conversions) are loaded with a `_get_optional` guard below.
+_OPTIONAL_PHYSICAL_KEYS = ("contactTime", "releaseTime_LW",
+                           "releaseTime_UW", "hGap")
+_OPTIONAL_STRING_KEYS = ("source_json", "source_json_name", "converter_version",
+                         "modelName", "z_correction_formula")
 
 
 def _is_compressed_npz(path) -> bool:
@@ -65,55 +94,179 @@ def _list_npz(folder: Path) -> list[Path]:
                   if not p.name.startswith("_"))
 
 
-def _read_npz(path):
-    """Pull the raw arrays out of one converted 3D NPZ.
+def _interp_rows(x_new: np.ndarray, x_old: np.ndarray,
+                 Y: np.ndarray) -> np.ndarray:
+    """np.interp on every ROW of Y (n_rows, len(x_old)) onto x_new at once.
 
-    TODO -- pending NPZ schema. Expected to return:
-      f_native: (Nx_native, Ny_native, Nt_native) gap field
-      x_native: (Nx_native,) native x-coord (normalized by R)
-      y_native: (Ny_native,) native y-coord (normalized by R)
-      t_native: (Nt_native,) time axis (raw or normalized)
-      src: provenance string for params
-      r_max: physical max in-disk radius (m) if recorded, else NaN
+    Edge clamp mirrors np.interp default: query points past x_old's range
+    take the nearest edge value. x_old MUST be strictly increasing.
     """
-    raise NotImplementedError(
-        "data/loader.py::_read_npz: 3D NPZ schema not yet defined. "
-        "Fill once `data/json_to_npz_converter.py` finalizes the field list.")
+    idx = np.searchsorted(x_old, x_new, side="left").clip(1, x_old.size - 1)
+    x0, x1 = x_old[idx - 1], x_old[idx]
+    w = np.clip((x_new - x0) / (x1 - x0), 0.0, 1.0)
+    return Y[:, idx - 1] * (1.0 - w) + Y[:, idx] * w
 
 
-def _canonicalize(f_native, x_native, y_native, t_native,
-                  x_canon, y_canon, t_canon):
-    """Resample one sim's field onto the canonical (nx, ny, nt) grid.
+def _precompute_bary(xy_native: np.ndarray,
+                     grid_pts: np.ndarray
+                     ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Delaunay-based barycentric weights for many "function" interpolations.
 
-    TODO -- pending NPZ schema. Likely path: bilinear interpolation on the
-    spatial axes (scipy.interpolate.RegularGridInterpolator over (x, y) for
-    each timestep) followed by 1D linear interpolation on the time axis (the
-    2D code's `_interp_rows` shape).
+    Builds one Delaunay over `xy_native`, locates each query point in the
+    grid in a simplex, then returns (vertices, weights, inside) so a caller
+    can interpolate any value vector v defined on the native points at all
+    query points via `(v[vertices] * weights).sum(axis=1)` -- without
+    re-running find_simplex on every value vector.
+
+    Returns:
+        vertices: (Nq, 3) int   indices into the native points
+        weights:  (Nq, 3) float barycentric coordinates summing to 1 inside
+        inside:   (Nq,)   bool  False where the query is outside the hull
     """
-    raise NotImplementedError(
-        "data/loader.py::_canonicalize: 3D resample not yet defined. "
-        "Pending NPZ schema; mirror the 2D `_canonicalize` shape -- "
-        "spatial first (RegularGridInterpolator over (x, y)), then a 1D "
-        "linear pass on the time axis.")
+    tri = Delaunay(xy_native)
+    simplex = tri.find_simplex(grid_pts)
+    inside = simplex >= 0
+    # For off-hull points, find_simplex returns -1; index 0 is a safe stand-in
+    # so the gather below does not raise; the inside mask zeroes them later.
+    simplex_safe = np.where(inside, simplex, 0)
+
+    # scipy stores per-simplex affine maps in tri.transform with shape
+    # (n_simplex, ndim+1, ndim). The first ndim rows of each (ndim+1, ndim)
+    # block, multiplied by (q - last_vertex), yield (ndim) barycentric
+    # coordinates b1..b_ndim; b_{ndim+1} = 1 - sum(b1..b_ndim).
+    T = tri.transform[simplex_safe]              # (Nq, 3, 2)
+    delta = grid_pts - T[:, 2, :]                # (Nq, 2)
+    b_first = np.einsum("ijk,ik->ij", T[:, :2, :], delta)  # (Nq, 2)
+    b_last = 1.0 - b_first.sum(axis=1, keepdims=True)
+    weights = np.concatenate([b_first, b_last], axis=1)    # (Nq, 3)
+    vertices = tri.simplices[simplex_safe]                 # (Nq, 3)
+    return vertices, weights, inside
+
+
+def _interp_to_grid(values: np.ndarray, vertices: np.ndarray,
+                    weights: np.ndarray, inside: np.ndarray,
+                    nx: int, ny: int) -> np.ndarray:
+    """Apply precomputed barycentric weights to a scalar field.
+
+    values: (N_native,) float -- displacement at every native point.
+    returns: (nx, ny) float32 -- value 0 off-hull (and where mask later kills).
+    """
+    q = (values[vertices] * weights).sum(axis=1)
+    q[~inside] = 0.0
+    return q.astype(np.float32).reshape(nx, ny)
+
+
+def _get_optional(z, key, default=None):
+    """Read a (possibly missing) NPZ key. 0-d numpy scalars unwrap to Python."""
+    if key not in z.files:
+        return default
+    val = z[key]
+    if isinstance(val, np.ndarray) and val.shape == ():
+        return val.item()
+    return val
 
 
 def _build_one(args):
+    """Load one converted-NPZ sim onto the canonical (Nx, Ny, Nt) grid."""
     path_str, x_canon, y_canon, t_canon = args
     p = Path(path_str)
-    f_native, x_native, y_native, t_native, src, r_max = _read_npz(p)
-    f = _canonicalize(f_native, x_native, y_native, t_native,
-                      x_canon, y_canon, t_canon)
-    meta = {"source": src,
-            "t_max": float(t_native[-1] - t_native[0]),
-            "r_max": r_max,
-            "nx_native": f_native.shape[0],
-            "ny_native": f_native.shape[1],
-            "nt_native": f_native.shape[2]}
-    return f, meta
+    nx, ny, nt = x_canon.size, y_canon.size, t_canon.size
+
+    # Canonical-grid query points (Nx*Ny, 2). Built once per sim.
+    X, Y = np.meshgrid(x_canon, y_canon, indexing="ij")
+    grid_pts = np.column_stack([X.ravel(), Y.ravel()])
+
+    with np.load(p, allow_pickle=True) as z:
+        if "num_samples" not in z.files:
+            raise ValueError(
+                f"{p.name}: missing `num_samples`; not a converted 3D NPZ?")
+        S = int(z["num_samples"])
+        step_idx_arr = np.asarray(z["sample_step_index"], dtype=np.int64)
+        time_idx_arr = np.asarray(z["sample_time_index_within_step"],
+                                  dtype=np.int64)
+        treal = np.asarray(z["sample_tReal"], dtype=np.float64)
+        bf = np.asarray(z["sample_bonding_front"], dtype=np.float32)
+
+        # Optional file-level metadata; copied into params for provenance.
+        params: dict = {"basename": p.name, "num_samples": S}
+        for k in _OPTIONAL_PHYSICAL_KEYS:
+            v = _get_optional(z, k)
+            if v is not None:
+                params[k] = float(v)
+        for k in _OPTIONAL_STRING_KEYS:
+            v = _get_optional(z, k)
+            if v is not None:
+                params[k] = str(v)
+        if "num_wafer_steps" in z.files:
+            params["num_wafer_steps"] = int(z["num_wafer_steps"])
+
+        # --- spatial: per-step Delaunay, shared across all samples in step ---
+        f_stack = np.zeros((S, nx, ny), dtype=np.float32)
+        for step_idx in np.unique(step_idx_arr):
+            mask = step_idx_arr == step_idx
+            sample_ks = np.where(mask)[0]
+            prefix = f"step_{int(step_idx):04d}"
+            coords = np.asarray(z[f"{prefix}_coordinates_upper"])    # (3, N_up)
+            xy_native = coords[:2, :].T.astype(np.float64)           # (N_up, 2)
+
+            # Quarter-symmetry validation: every native point must lie in the
+            # first quadrant (small float tolerance). A negative coordinate
+            # means either the converter wrote a wrong quadrant or the user
+            # is feeding 2D / full-disk data to the 3D loader.
+            if ((xy_native[:, 0] < -_QUARTER_TOL).any() or
+                    (xy_native[:, 1] < -_QUARTER_TOL).any()):
+                raise ValueError(
+                    f"{p.name} step {int(step_idx)}: native (x, y) coordinates"
+                    f" outside the first quadrant; loader expects "
+                    f"quarter-symmetry data.")
+            xy_native = np.maximum(xy_native, 0.0)  # snap tiny negatives to 0
+
+            vertices, weights, inside = _precompute_bary(xy_native, grid_pts)
+
+            disp_all = np.asarray(
+                z[f"{prefix}_displacement_z_corrected_upper"]
+            )                                                        # (T_i, N_up)
+            for k in sample_ks:
+                values = disp_all[int(time_idx_arr[k]), :].astype(np.float64)
+                f_stack[k] = _interp_to_grid(values, vertices, weights,
+                                             inside, nx, ny)
+
+    # --- mask off-disk cells (corners of the bounding square) ---
+    mask2d = disk_mask(nx, ny, x_canon[-1], y_canon[-1])
+    f_stack[:, ~mask2d] = 0.0
+
+    # --- temporal: validate tReal, dedupe step boundaries, resample to Nt ---
+    if treal.size != S:
+        raise ValueError(
+            f"{p.name}: sample_tReal length {treal.size} != num_samples {S}")
+    dt = np.diff(treal)
+    forward = dt[dt > 0]
+    typ_dt = float(np.median(forward)) if forward.size else 0.0
+    if np.any(dt < -typ_dt):
+        raise ValueError(
+            f"{p.name}: sample_tReal jumps backward by more than one typical"
+            f" timestep (typ_dt={typ_dt:g}); concat order is suspect.")
+    span = float(treal.max() - treal.min())
+    if span <= 0:
+        raise ValueError(f"{p.name}: sample_tReal has zero span.")
+    s = (treal - treal.min()) / span                                   # (S,)
+
+    # Collapse exact / sub-step duplicates at step boundaries (same as 2D).
+    s_u, keep_t = np.unique(s, return_index=True)
+    f_flat = f_stack.reshape(S, nx * ny)[keep_t].T                      # (Nx*Ny, S_u)
+    bf_u = bf[keep_t]
+    f_canon_flat = _interp_rows(t_canon, s_u, f_flat)                   # (Nx*Ny, Nt)
+    f = f_canon_flat.T.reshape(nt, nx, ny).transpose(1, 2, 0)           # (Nx, Ny, Nt)
+    # Time-resample bonding_front onto the same canonical Nt for params.
+    bf_canon = np.interp(t_canon, s_u, bf_u.astype(np.float64)).astype(np.float32)
+
+    params["t_max"] = span
+    params["bonding_front"] = bf_canon
+    return f.astype(np.float32, copy=False), params
 
 
 def _build(files, x_canon, y_canon, t_canon, workers: int | None = None):
-    """Canonicalize all files in parallel; preallocate the result stack."""
+    """Canonicalize all files; parallelize for large sets with progress/ETA."""
     n = len(files)
     if workers is None:
         workers = max(1, (os.cpu_count() or 2) - 2)
@@ -129,11 +282,11 @@ def _build(files, x_canon, y_canon, t_canon, workers: int | None = None):
             rate = k / max(now - t0, 1e-9)
             eta_min = (n - k) / max(rate, 1e-9) / 60.0
             print(f"  loader: {k}/{n} files ({100.0 * k / n:.1f}%)  "
-                  f"{rate:.1f}/s  ETA {eta_min:.1f} min", flush=True)
+                  f"{rate:.2f}/s  ETA {eta_min:.1f} min", flush=True)
             last[0] = now
 
     nx, ny, nt = x_canon.size, y_canon.size, t_canon.size
-    F = np.empty((n, nx, ny, nt), dtype=np.float64)
+    F = np.empty((n, nx, ny, nt), dtype=np.float32)
     meta: list = [None] * n
 
     def _store(j: int, res) -> None:
@@ -156,32 +309,40 @@ def _build(files, x_canon, y_canon, t_canon, workers: int | None = None):
 
 
 def _save_cache(cache_path, x_canon, y_canon, F, meta, files, nx, ny, nt):
+    """Atomic uncompressed cache write -- per-sim params kept as object dtype.
+
+    np.savez does not understand nested dicts; flatten each Simulation.params
+    into per-sim arrays sized (N_sim,) and let the loader rehydrate dicts.
+    """
     tmp = cache_path.with_suffix(".tmp.npz")
+    # Per-sim arrays (object dtype) for everything not array-typed.
+    # bonding_front is a (Nt,) array per sim -> stack to (N_sim, Nt).
+    bf_stack = np.stack([m["bonding_front"] for m in meta], axis=0).astype(np.float32)
+    basenames = np.array([m.get("basename", "") for m in meta], dtype=object)
+    t_max = np.array([m.get("t_max", float("nan")) for m in meta], dtype=np.float64)
+    # Carry the rest as an object array of dicts for fidelity.
+    params_obj = np.empty(len(meta), dtype=object)
+    for i, m in enumerate(meta):
+        m_copy = {k: v for k, v in m.items()
+                  if k not in ("bonding_front", "basename", "t_max")}
+        params_obj[i] = m_copy
     np.savez(
         tmp, x_canon=x_canon, y_canon=y_canon, F=F, nx=nx, ny=ny, nt=nt,
-        sources=np.array([m["source"] for m in meta], dtype=object),
-        t_max=np.array([m["t_max"] for m in meta], dtype=np.float64),
-        r_max=np.array([m["r_max"] for m in meta], dtype=np.float64),
-        nx_native=np.array([m["nx_native"] for m in meta], dtype=np.int64),
-        ny_native=np.array([m["ny_native"] for m in meta], dtype=np.int64),
-        nt_native=np.array([m["nt_native"] for m in meta], dtype=np.int64),
-        src_files=np.array([p.name for p in files], dtype=object))
+        src_files=np.array([p.name for p in files], dtype=object),
+        basenames=basenames, t_max=t_max,
+        bonding_front=bf_stack, params=params_obj)
     tmp.replace(cache_path)
 
 
-def _sims_from_arrays(F, sources, t_max, r_max, nx_native, ny_native,
-                      nt_native, basenames=None):
-    if basenames is None:
-        basenames = [""] * len(F)
-    return [Simulation(f=F[i],
-                       params={"source": str(sources[i]),
-                               "t_max": float(t_max[i]),
-                               "r_max": float(r_max[i]),
-                               "nx_native": int(nx_native[i]),
-                               "ny_native": int(ny_native[i]),
-                               "nt_native": int(nt_native[i]),
-                               "basename": str(basenames[i])})
-            for i in range(len(F))]
+def _sims_from_arrays(F, basenames, t_max, bonding_front, params_obj):
+    sims = []
+    for i in range(len(F)):
+        params = dict(params_obj[i]) if params_obj[i] is not None else {}
+        params["basename"] = str(basenames[i])
+        params["t_max"] = float(t_max[i])
+        params["bonding_front"] = np.asarray(bonding_front[i], dtype=np.float32)
+        sims.append(Simulation(f=F[i], params=params))
+    return sims
 
 
 def _try_load_cache(cache_path, nx, ny, nt, current_names):
@@ -210,9 +371,8 @@ def _try_load_cache(cache_path, nx, ny, nt, current_names):
         tmp = cache_path.with_suffix(".tmp.npz")
         np.savez(tmp, **d)
         tmp.replace(cache_path)
-    sims = _sims_from_arrays(d["F"], d["sources"], d["t_max"], d["r_max"],
-                             d["nx_native"], d["ny_native"], d["nt_native"],
-                             basenames=d.get("src_files"))
+    sims = _sims_from_arrays(d["F"], d["basenames"], d["t_max"],
+                             d["bonding_front"], d["params"])
     return d["x_canon"], d["y_canon"], sims
 
 
@@ -220,10 +380,9 @@ def load_dataset(path, nx: int = 128, ny: int = 128, nt: int = 300,
                  x_end: float = 1.0, y_end: float = 1.0,
                  cache: bool = True, limit: int | None = None,
                  workers: int | None = None):
-    """Load converted 3D NPZ sims onto a common grid.
+    """Load converted 3D NPZ sims onto a common quarter-disk grid.
 
     Returns (x_canon, y_canon, [Simulation]). Cache hits never spawn workers.
-    Will raise NotImplementedError until the 3D NPZ schema is wired up.
     """
     folder = Path(path)
     if not folder.is_dir():
@@ -238,8 +397,6 @@ def load_dataset(path, nx: int = 128, ny: int = 128, nt: int = 300,
     t_canon = np.linspace(0.0, 1.0, nt)
     cache_path = folder / f"{_CACHE_PREFIX}{nx}x{ny}x{nt}.npz"
 
-    # Sweep stale .tmp.npz left by a prior failed cache write (disk-full
-    # safety -- a multi-GB .tmp can otherwise sit there forever).
     for stale in folder.glob(f"{_CACHE_PREFIX}*.tmp.npz"):
         try:
             sz_gb = stale.stat().st_size / 1e9
@@ -279,8 +436,10 @@ def load_dataset(path, nx: int = 128, ny: int = 128, nt: int = 300,
                   f"removed partial .tmp ({tmp_gb:.1f} GB) and continuing "
                   f"without cache. Free disk space (need ~{gb:.0f} GB) "
                   f"before the next run to enable caching.", flush=True)
-    return x_canon, y_canon, _sims_from_arrays(
-        F, [m["source"] for m in meta], [m["t_max"] for m in meta],
-        [m["r_max"] for m in meta], [m["nx_native"] for m in meta],
-        [m["ny_native"] for m in meta], [m["nt_native"] for m in meta],
-        basenames=[p.name for p in files])
+    # In-memory return path (cache disabled, limit set, or write failed).
+    sims = []
+    for i, p in enumerate(files):
+        params = dict(meta[i])
+        params["basename"] = p.name
+        sims.append(Simulation(f=F[i], params=params))
+    return x_canon, y_canon, sims

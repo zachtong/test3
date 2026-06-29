@@ -14,6 +14,17 @@ from the n sensor traces. Sensors are placed on a polar `(r, theta)` schedule
 mapped to nearest Cartesian grid indices, so the rig-side intuition of "an
 edge sensor on the X axis" is preserved.
 
+## Quarter-symmetry assumption
+
+The COMSOL simulation enforces 90-degree rotational symmetry about the z
+axis, so all stored data live in the first quadrant only. The canonical
+grid covers `[0, 1] x [0, 1]` (not the full disk), the disk mask is the
+quarter-disk, and sensor `theta` must lie in `[0, 90]` degrees. A
+quarter-disk view captures the full physical wafer field once C4 symmetry
+is applied (mirror-and-rotate at visualization time). Training and POD
+operate purely on the quarter; the model never sees the redundant three
+copies.
+
 ## Status
 
 Early scaffolding. Generic infrastructure (BiTCN, training loop, normalization,

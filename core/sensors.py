@@ -34,8 +34,12 @@ def place_sensors(cfg: SensorConfig) -> np.ndarray:
     """Return (n, 2) array of Cartesian (x, y) sensor positions.
 
     Only the "custom" strategy is supported today; positions must be a tuple
-    of (r, theta_deg) pairs of length `cfg.n`. Ring / log strategies can be
-    added later but are deferred until the rig schedule is known.
+    of (r, theta_deg) pairs of length `cfg.n`. Quarter-symmetry constraint:
+    every theta MUST be in [0, 90] degrees, because the simulation only
+    stores the first-quadrant points -- a sensor at e.g. theta = 180 has no
+    independent reading (by C4 symmetry it equals theta = 0) and points to
+    a region the canonical grid does not cover. Reject rather than silently
+    fold so configuration errors surface early.
     """
     if cfg.strategy != "custom":
         raise ValueError(f"unsupported strategy {cfg.strategy!r}; "
@@ -43,6 +47,14 @@ def place_sensors(cfg: SensorConfig) -> np.ndarray:
     if len(cfg.positions) != cfg.n:
         raise ValueError(f"need {cfg.n} (r, theta) positions, "
                          f"got {len(cfg.positions)}")
+    for i, (r, th) in enumerate(cfg.positions):
+        if not (0.0 <= th <= 90.0):
+            raise ValueError(
+                f"sensor {i}: theta={th} deg is outside the quarter-symmetry "
+                f"window [0, 90]. The simulation only stores the first "
+                f"quadrant; place the sensor at its C4-equivalent angle.")
+        if r < 0.0:
+            raise ValueError(f"sensor {i}: r={r} must be non-negative")
     xy = np.array([polar_to_xy(r, th) for r, th in cfg.positions],
                   dtype=np.float64)
     return xy

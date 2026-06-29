@@ -1,14 +1,15 @@
-"""Canonical Cartesian grid and polar <-> Cartesian helpers.
+"""Canonical Cartesian grid (quarter-disk) and polar <-> Cartesian helpers.
 
-The canonical grid is x in [-x_end, x_end] and y in [-y_end, y_end] (both
-normalized by the wafer radius R; the wafer is a unit disk in normalized
-coords when x_end = y_end = 1.0). Off-disk grid cells (r > 1.0) hold the
-sentinel value `OFF_WAFER` so downstream code can mask them out before
-field-error or projection math.
+The simulation enforces 90-degree rotational symmetry about the z axis, so
+the data lives entirely in the first quadrant. The canonical grid covers
+`x in [0, x_end]` and `y in [0, y_end]` (both normalized by the wafer
+radius R; the wafer's first-quadrant arc is the curve x^2 + y^2 = 1 when
+x_end = y_end = 1.0). Off-disk and off-quadrant cells are masked out by
+`disk_mask` so downstream code can zero them before field-error or POD math.
 
 Sensor placements are specified in polar (r, theta) in the config because
 that matches the rig-side intuition ("an edge sensor on the X axis at
-r = 1.0"); index lookup is done against this Cartesian grid.
+r = 1.0"); theta is constrained to [0, 90] degrees.
 """
 
 from __future__ import annotations
@@ -16,30 +17,30 @@ from __future__ import annotations
 import numpy as np
 
 
-OFF_WAFER = np.float64("nan")
-
-
 def canonical_grid(nx: int, ny: int, x_end: float = 1.0, y_end: float = 1.0
                    ) -> tuple[np.ndarray, np.ndarray]:
     """Return (x_canon, y_canon) -- 1D coord vectors, length nx and ny.
 
-    Grids are centred on the origin so the wafer disk lies symmetrically.
+    Quarter layout: both axes run from 0 to the corresponding `*_end`. The
+    wafer's first-quadrant region is the quarter-disk `x^2 + y^2 <= 1` when
+    x_end = y_end = 1.0.
     """
-    x = np.linspace(-x_end, x_end, nx)
-    y = np.linspace(-y_end, y_end, ny)
+    x = np.linspace(0.0, x_end, nx)
+    y = np.linspace(0.0, y_end, ny)
     return x, y
 
 
 def disk_mask(nx: int, ny: int, x_end: float = 1.0, y_end: float = 1.0,
               r_end: float = 1.0) -> np.ndarray:
-    """Boolean (Nx, Ny) mask: True where the cell is INSIDE the wafer disk.
+    """Boolean (Nx, Ny) mask: True where the cell is INSIDE the quarter-disk.
 
-    Use to zero/ignore off-wafer cells in field-error / POD math; the wafer
-    is a circle of normalized radius `r_end` (default 1.0).
+    A cell is in-disk iff x >= 0, y >= 0 (the first-quadrant constraint is
+    implicit in `canonical_grid` but stated here for clarity), and
+    x^2 + y^2 <= r_end^2.
     """
     x, y = canonical_grid(nx, ny, x_end, y_end)
     X, Y = np.meshgrid(x, y, indexing="ij")
-    return X * X + Y * Y <= r_end * r_end
+    return (X >= 0.0) & (Y >= 0.0) & (X * X + Y * Y <= r_end * r_end)
 
 
 def polar_to_xy(r: float, theta_deg: float) -> tuple[float, float]:

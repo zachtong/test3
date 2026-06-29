@@ -1,13 +1,11 @@
 # 3D POD + BiTCN default config.
 #
-# Sensor positions are (r, theta_deg) pairs: r in [0, 1] (fraction of the
-# wafer radius), theta in degrees CCW from +x. The example below puts
-# n=4 sensors at the edge (r=1.0) on the X / Y / D=45 / -D=-45 axes --
-# adapt to whatever the rig actually supports.
-#
-# The wafer is a unit disk in normalized coordinates (x, y in [-1, 1] with
-# the circle r=1 the wafer edge). Set data.npz_dir before training; the
-# 3D loader is a stub until the NPZ schema is wired up.
+# Quarter-symmetry: the simulation assumes 90-degree rotational symmetry
+# about the z axis, so the data and the canonical grid both cover only
+# the first quadrant (x, y in [0, 1]). Sensor positions are (r, theta_deg)
+# pairs with theta in [0, 90]; the rig is also configured this way, so the
+# three edge sensors below (X axis, +D diagonal, Y axis) map 1:1 onto real
+# physical sensors at validation time.
 
 data:
   npz_dir: "REPLACE_WITH/dataset3d_npz"
@@ -25,13 +23,12 @@ pod:
   k: 8
 
 sensors:
-  n: 4
+  n: 3
   strategy: custom
   positions:
     - [1.0, 0.0]      # +X edge
-    - [1.0, 90.0]     # +Y edge
     - [1.0, 45.0]     # +D edge
-    - [1.0, -45.0]    # -D edge
+    - [1.0, 90.0]     # +Y edge
 
 model:
   arch: bitcn
