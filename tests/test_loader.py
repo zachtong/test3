@@ -165,6 +165,38 @@ def test_preflight_accepts_clean(tmp_path):
     assert ok is True, f"good fixture rejected: {reason}"
 
 
+def test_field_covers_full_quarter_disk(tmp_path):
+    """Regression: native coord -> canonical grid normalisation must cover
+    the WHOLE quarter-disk, not just the (0..R) corner.
+
+    Before the loader divided native coords by R, the Delaunay triangulation
+    sat in the [0, 0.15] x [0, 0.15] corner of the canonical [0, 1] grid;
+    everything outside that 15% x 15% square was off-hull and got masked
+    to 0. This test asserts that the field at canonical (~0.5, ~0.5)
+    -- well inside the quarter-disk but well outside the old broken
+    coverage region -- has non-trivial signal at the last time step.
+    """
+    folder = tmp_path / "coverage"
+    folder.mkdir()
+    make_mock_3d_npz(folder / "data.npz", n_steps=2, t_per_step=(5, 4),
+                     n_upper_per_step=(120, 150),
+                     n_lower_per_step=(100, 130), seed=42)
+    _, _, sims = load_dataset(folder, nx=64, ny=64, nt=8,
+                              cache=False, workers=1)
+    assert len(sims) == 1
+    f = sims[0].f  # (64, 64, 8)
+    # Canonical (0.5, 0.5) is index (32, 32) on a 64-grid.
+    last_t = f[32, 32, -1]
+    assert np.isfinite(last_t)
+    assert abs(last_t) > 1e-4, (
+        f"field at canonical (0.5, 0.5) at last time = {last_t}; "
+        f"expected non-trivial signal. Coord normalisation regressed?")
+    # And the edge (1.0, 0.0) which sits on the quarter-disk boundary
+    # also needs to be reachable -- this is where the rig sensor lives.
+    edge = f[-1, 0, -1]
+    assert np.isfinite(edge), f"edge cell is NaN: {edge}"
+
+
 def test_preflight_tolerates_small_treal_overlap(tmp_path):
     """A backward jump of a few sub-step samples must NOT fail preflight.
 

@@ -159,24 +159,18 @@ def diagnose(path: Path) -> int:
     if abs(biggest_axis - _ASSUMED_R_METRES) < _ASSUMED_R_METRES * tol:
         print(f"  -> matches PHYSICAL METRES (R = {_ASSUMED_R_METRES} m) "
               f"within {tol*100:.0f}%.")
-        print("     CONVERTER IS NOT NORMALISING coordinates. The loader "
-              "currently assumes [0, 1] -> Delaunay covers only the bottom-"
-              f"left {_ASSUMED_R_METRES*100:.0f}% x "
-              f"{_ASSUMED_R_METRES*100:.0f}% of the canonical grid, "
-              "and the rest is masked to 0. This explains the 'tiny corner' "
-              "snapshots.")
-        print("     FIX: divide native coords by R = "
-              f"{_ASSUMED_R_METRES} in loader (or have the converter "
-              "normalise).")
-        return 2
+        print(f"     This is the EXPECTED format. The loader normalises "
+              f"native coords by R = {_ASSUMED_R_METRES} m so the "
+              f"canonical [0, 1] grid covers the full quarter-disk.")
+        return 0
     if abs(biggest_axis - 1.0) < 0.05:
         print("  -> matches NORMALISED coordinates (~1.0).")
-        print("     coord-units hypothesis is REJECTED. The 'tiny corner' "
-              "symptom must come from something else: maybe the "
-              "displacement field is genuinely tiny outside that region, "
-              "or the colour scale is hiding the rest. Spot-check disp "
-              "magnitudes printed above against your expectation.")
-        return 0
+        print("     WARNING: the loader expects raw metres and will divide "
+              f"by R = {_ASSUMED_R_METRES} m again, leading to "
+              f"double-normalisation. The converter has changed its "
+              f"contract -- either drop the converter-side normalisation "
+              f"or remove the loader-side divide.")
+        return 2
     print(f"  -> does not match either ~{_ASSUMED_R_METRES} m or ~1.0; "
           f"observed {biggest_axis:.6g}.")
     print("     Possible: coords in millimetres, micrometres, or some "

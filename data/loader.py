@@ -72,6 +72,16 @@ _QUARTER_TOL = 1e-6   # native x/y allowed slightly negative due to float roundo
 # salvageable.
 _TREAL_BACKWARD_FACTOR = 10.0
 
+# Wafer physical radius. The 3D converter writes coordinates_upper /
+# _lower in raw physical metres (range 0 .. R), but the canonical grid
+# downstream lives in normalised [0, 1]. The loader divides every
+# native (x, y) by this constant before feeding it to Delaunay so the
+# point cloud and the canonical grid agree on units. Matches the 2D
+# pipeline's WAFER_RADIUS_M = 0.15. If you ever switch to a different
+# wafer size, change this constant -- preflight checks that
+# max(x), max(y) fall within [0.5*R, 1.5*R] and will reject otherwise.
+_WAFER_RADIUS_M = 0.15
+
 
 # Per-sim metadata pulled from file-level / COMSOL-level NPZ keys; copied
 # into Simulation.params for downstream provenance and conditional-feature
@@ -267,7 +277,15 @@ def preflight_npz(path) -> tuple[bool, str | None]:
                 return False, (f"num_samples ({S}) != sum_i T_i "
                                f"({total_T})")
 
-            # (10) quarter-disk on every upper coord set
+            # (10) quarter-disk on every upper coord set + native-units
+            # sanity check. Native coords must (a) lie in the first
+            # quadrant and (b) reach a max in the expected physical
+            # range [0.5*R, 1.5*R] -- the loader normalises by
+            # _WAFER_RADIUS_M, so coords already in [0, 1] or in a wildly
+            # different unit (mm, um, ...) would silently produce a
+            # wrong-scale grid.
+            r_lo = 0.5 * _WAFER_RADIUS_M
+            r_hi = 1.5 * _WAFER_RADIUS_M
             for i in range(nws):
                 coords = z[f"step_{i:04d}_coordinates_upper"]
                 x_min, y_min = float(coords[0].min()), float(coords[1].min())
@@ -275,6 +293,15 @@ def preflight_npz(path) -> tuple[bool, str | None]:
                     return False, (f"step_{i:04d}_coordinates_upper: native "
                                    f"coords outside first quadrant; "
                                    f"min(x)={x_min:g}, min(y)={y_min:g}")
+                x_max, y_max = float(coords[0].max()), float(coords[1].max())
+                axis_max = max(x_max, y_max)
+                if not (r_lo <= axis_max <= r_hi):
+                    return False, (
+                        f"step_{i:04d}_coordinates_upper: max(|x|, |y|) = "
+                        f"{axis_max:g} outside expected range "
+                        f"[{r_lo:g}, {r_hi:g}] m (loader assumes native "
+                        f"coords in physical metres with R = "
+                        f"{_WAFER_RADIUS_M} m)")
 
             # (11) sample_tReal monotonicity; small overlaps at step
             # boundaries are tolerated (see _TREAL_BACKWARD_FACTOR comment).
@@ -418,19 +445,21 @@ def _build_one(args):
             sample_ks = np.where(mask)[0]
             prefix = f"step_{int(step_idx):04d}"
             coords = np.asarray(z[f"{prefix}_coordinates_upper"])    # (3, N_up)
-            xy_native = coords[:2, :].T.astype(np.float64)           # (N_up, 2)
+            # Normalise from physical metres into the canonical [0, 1] frame.
+            # The converter writes raw COMSOL coordinates (range 0..R, with
+            # R = _WAFER_RADIUS_M); the canonical grid is normalised, so
+            # this division is what makes Delaunay actually cover the full
+            # quarter-disk. Without it the entire wafer mesh gets crammed
+            # into the (0..R) corner of the canonical grid and ~99% of the
+            # canonical cells fall outside the convex hull -> masked to 0.
+            xy_native = (coords[:2, :].T.astype(np.float64)
+                         / _WAFER_RADIUS_M)                           # (N_up, 2)
 
             # Quarter-symmetry validation: every native point must lie in the
-            # first quadrant (small float tolerance). A negative coordinate
-            # means either the converter wrote a wrong quadrant or the user
-            # is feeding 2D / full-disk data to the 3D loader.
-            if ((xy_native[:, 0] < -_QUARTER_TOL).any() or
-                    (xy_native[:, 1] < -_QUARTER_TOL).any()):
-                raise ValueError(
-                    f"{p.name} step {int(step_idx)}: native (x, y) coordinates"
-                    f" outside the first quadrant; loader expects "
-                    f"quarter-symmetry data.")
-            xy_native = np.maximum(xy_native, 0.0)  # snap tiny negatives to 0
+            # first quadrant (small float tolerance). preflight already
+            # checked this on the RAW coords, but the small-negative
+            # tolerance is per-coord so we re-snap here.
+            xy_native = np.maximum(xy_native, 0.0)
 
             vertices, weights, inside = _precompute_bary(xy_native, grid_pts)
 
