@@ -291,7 +291,43 @@ No co-moving shift, no sPOD, no front-channel target. The basis fitted in
 read but is NOT part of `sim.f` and NOT predicted by the model in this
 phase.
 
-### 5.4 Skip-tolerant policy: bad NPZ files are skipped, not fatal
+### 5.4 Drop-first-steps: pre-contact equilibration cut at load time
+
+The current 3D converter writes the leading waferData step (step_0000)
+even though it represents a long pre-contact equilibration phase where
+the wafer is barely deforming. Empirically that step holds ~99% of the
+sim's native time samples spread over ~99% of tReal but carries near
+zero displacement signal; the actual bonding event lives in the last
+~5% of tReal. Uniform canonical resampling at Nt=300 then crushes the
+real bonding event into a handful of canonical t-indices (a long flat
+plateau followed by a single big jump at the last t-idx) and makes the
+data effectively untrainable.
+
+Re-running the converter to drop step_0000 was rejected as too
+expensive. The loader instead exposes a `drop_first_steps: int = 0`
+parameter that filters every sample whose `sample_step_index < N`
+before canonicalize. With `drop_first_steps=1`:
+
+- step_0000's samples are discarded; the on-disk step_0000_* keys are
+  not touched
+- the surviving `sample_tReal` is renormalised to [0, 1] within the
+  kept window, so canonical resampling now sees a dense, well-spaced
+  trajectory
+- `sim.params` records `num_samples` (post-drop),
+  `num_samples_raw` (pre-drop), `n_samples_dropped_from_first_steps`,
+  and `drop_first_steps` for provenance
+- the loader cache filename gains a `_drop{N}` suffix when N > 0 so
+  drop and no-drop caches never collide (N = 0 keeps the plain
+  filename for backward compatibility)
+- if `drop_first_steps` is so large that every sample is removed for
+  a sim, that sim becomes a skip via the same `_build_one_safe`
+  mechanism that handles preflight failures
+
+Configured via `data.drop_first_steps` in YAML; default in
+`configs/default.yaml` is 1 (the firehorse2-style data needs it),
+override with `--data.drop_first_steps 0` to disable.
+
+### 5.5 Skip-tolerant policy: bad NPZ files are skipped, not fatal
 
 Re-running the COMSOL converter is expensive enough that the dataset
 folder is allowed to contain a few "bad" NPZs -- files that open as zip

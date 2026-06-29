@@ -18,6 +18,13 @@ data:
   train_frac: 0.80
   seed: 7
   limit: null
+  # Drop the leading converter step (step_0000) at load time. The
+  # current 3D converter keeps a pre-contact equilibration step that
+  # holds ~99% of native samples in ~99% of tReal but carries near
+  # zero displacement signal; uniform canonical resample otherwise
+  # crushes the real bonding event (last 5% of time) into a handful
+  # of canonical t-indices. Set to 0 to disable trim.
+  drop_first_steps: 1
 
 pod:
   k: 8

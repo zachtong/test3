@@ -88,7 +88,8 @@ def main() -> None:
     x_canon, y_canon, sims = load_dataset(
         cfg.data.npz_dir, nx=cfg.data.nx, ny=cfg.data.ny, nt=cfg.data.nt,
         x_end=cfg.data.x_end, y_end=cfg.data.y_end, limit=cfg.data.limit,
-        workers=cfg.data.workers)
+        workers=cfg.data.workers,
+        drop_first_steps=cfg.data.drop_first_steps)
     print(f"data: {len(sims)} sims ({time.time() - t0:.1f}s)")
 
     split = split_dataset(sims, train_frac=cfg.data.train_frac,

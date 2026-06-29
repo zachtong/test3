@@ -197,6 +197,53 @@ def test_field_covers_full_quarter_disk(tmp_path):
     assert np.isfinite(edge), f"edge cell is NaN: {edge}"
 
 
+def test_drop_first_steps(tmp_path):
+    """drop_first_steps=1 removes step_0000 samples; resulting sim is
+    shorter and the cache filename carries the _drop1 suffix so the
+    two configurations never collide.
+    """
+    folder = tmp_path / "drop"
+    folder.mkdir()
+    # 2-step mock: step 0 has 5 samples, step 1 has 4. total S = 9.
+    make_mock_3d_npz(folder / "a.npz", n_steps=2, t_per_step=(5, 4),
+                     n_upper_per_step=(50, 60),
+                     n_lower_per_step=(40, 55), seed=0)
+    # Baseline: drop_first_steps=0 keeps all 9 samples.
+    _, _, sims0 = load_dataset(folder, nx=16, ny=16, nt=8, cache=False,
+                               workers=1, drop_first_steps=0)
+    assert sims0[0].params["num_samples"] == 9
+    assert sims0[0].params["n_samples_dropped_from_first_steps"] == 0
+    # Drop step 0: remaining 4 samples come from step 1.
+    _, _, sims1 = load_dataset(folder, nx=16, ny=16, nt=8, cache=False,
+                               workers=1, drop_first_steps=1)
+    assert sims1[0].params["num_samples"] == 4
+    assert sims1[0].params["num_samples_raw"] == 9
+    assert sims1[0].params["n_samples_dropped_from_first_steps"] == 5
+    assert sims1[0].params["drop_first_steps"] == 1
+    # Cache filenames differ so the two configurations never collide.
+    _, _, _ = load_dataset(folder, nx=16, ny=16, nt=8, cache=True,
+                           workers=1, drop_first_steps=0)
+    _, _, _ = load_dataset(folder, nx=16, ny=16, nt=8, cache=True,
+                           workers=1, drop_first_steps=1)
+    assert (folder / "_loader_cache_16x16x8.npz").exists()
+    assert (folder / "_loader_cache_16x16x8_drop1.npz").exists()
+
+
+def test_drop_first_steps_too_many_raises(tmp_path):
+    """drop_first_steps >= num_wafer_steps removes every sample; the
+    per-sim _build_one_safe wraps the ValueError into a skip reason,
+    so the file becomes a skip and (when it's the only file) the
+    load_dataset call ends in a zero-sims RuntimeError."""
+    folder = tmp_path / "drop_all"
+    folder.mkdir()
+    make_mock_3d_npz(folder / "a.npz", n_steps=2, t_per_step=(5, 4),
+                     n_upper_per_step=(50, 60),
+                     n_lower_per_step=(40, 55), seed=0)
+    with pytest.raises(RuntimeError, match="passed preflight"):
+        load_dataset(folder, nx=16, ny=16, nt=8, cache=False,
+                     workers=1, drop_first_steps=5)
+
+
 def test_preflight_tolerates_small_treal_overlap(tmp_path):
     """A backward jump of a few sub-step samples must NOT fail preflight.
 

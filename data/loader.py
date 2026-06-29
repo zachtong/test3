@@ -397,8 +397,19 @@ def _get_optional(z, key, default=None):
 
 
 def _build_one(args):
-    """Load one converted-NPZ sim onto the canonical (Nx, Ny, Nt) grid."""
-    path_str, x_canon, y_canon, t_canon = args
+    """Load one converted-NPZ sim onto the canonical (Nx, Ny, Nt) grid.
+
+    args is a 5-tuple (path_str, x_canon, y_canon, t_canon,
+    drop_first_steps). The last element is the count of leading
+    waferData steps to discard at load time. The 3D converter is known
+    to keep a pre-contact equilibration step (step_0000) whose samples
+    span ~99% of tReal but carry almost no signal (~98% of native
+    samples sit in the dense bonding window in the last 5% of time).
+    Setting drop_first_steps=1 throws away step_0000's samples before
+    canonicalize, recovers a sane native sample density in time, and
+    keeps the loader cache key separate from the no-drop case.
+    """
+    (path_str, x_canon, y_canon, t_canon, drop_first_steps) = args
     p = Path(path_str)
     nx, ny, nt = x_canon.size, y_canon.size, t_canon.size
 
@@ -410,15 +421,40 @@ def _build_one(args):
         if "num_samples" not in z.files:
             raise ValueError(
                 f"{p.name}: missing `num_samples`; not a converted 3D NPZ?")
-        S = int(z["num_samples"])
+        S_raw = int(z["num_samples"])
         step_idx_arr = np.asarray(z["sample_step_index"], dtype=np.int64)
         time_idx_arr = np.asarray(z["sample_time_index_within_step"],
                                   dtype=np.int64)
         treal = np.asarray(z["sample_tReal"], dtype=np.float64)
         bf = np.asarray(z["sample_bonding_front"], dtype=np.float32)
 
+        # --- drop-first-steps: drop every sample whose original step
+        # index is < drop_first_steps. Leaves the on-disk step_* keys
+        # intact (we just never read them); re-numbering the surviving
+        # step indices is unnecessary because the per-step Delaunay
+        # loop below only iterates over the indices that actually
+        # appear in the filtered step_idx_arr.
+        if drop_first_steps > 0:
+            keep = step_idx_arr >= drop_first_steps
+            n_dropped = int((~keep).sum())
+            step_idx_arr = step_idx_arr[keep]
+            time_idx_arr = time_idx_arr[keep]
+            treal = treal[keep]
+            bf = bf[keep]
+            if step_idx_arr.size == 0:
+                raise ValueError(
+                    f"{p.name}: drop_first_steps={drop_first_steps} "
+                    f"removed every sample (no step >= "
+                    f"{drop_first_steps} exists).")
+        else:
+            n_dropped = 0
+        S = step_idx_arr.size
+
         # Optional file-level metadata; copied into params for provenance.
-        params: dict = {"basename": p.name, "num_samples": S}
+        params: dict = {"basename": p.name, "num_samples": S,
+                        "num_samples_raw": S_raw,
+                        "n_samples_dropped_from_first_steps": n_dropped,
+                        "drop_first_steps": drop_first_steps}
         for k in _OPTIONAL_PHYSICAL_KEYS:
             v = _get_optional(z, k)
             if v is not None:
@@ -439,6 +475,7 @@ def _build_one(args):
             params["num_wafer_steps"] = int(z["num_wafer_steps"])
 
         # --- spatial: per-step Delaunay, shared across all samples in step ---
+        # Pre-allocate at the FILTERED count S, not raw S_raw.
         f_stack = np.zeros((S, nx, ny), dtype=np.float32)
         for step_idx in np.unique(step_idx_arr):
             mask = step_idx_arr == step_idx
@@ -557,7 +594,8 @@ def _summarize_skips(skip_log: list[dict]) -> None:
         print(f"    ... and {len(skip_log) - cap} more", flush=True)
 
 
-def _build(files, x_canon, y_canon, t_canon, workers: int | None = None
+def _build(files, x_canon, y_canon, t_canon, workers: int | None = None,
+           drop_first_steps: int = 0
            ) -> tuple[np.ndarray, list[dict], list[dict]]:
     """Canonicalize files; skip bad NPZs.
 
@@ -570,7 +608,8 @@ def _build(files, x_canon, y_canon, t_canon, workers: int | None = None
     if workers is None:
         workers = max(1, (os.cpu_count() or 2) - 2)
     workers = min(workers, n)
-    args = [(str(p), x_canon, y_canon, t_canon) for p in files]
+    args = [(str(p), x_canon, y_canon, t_canon, drop_first_steps)
+            for p in files]
 
     t0 = time.time()
     last = [0.0]
@@ -740,7 +779,8 @@ def _try_load_cache(cache_path, nx, ny, nt, current_names: set[str]):
 def load_dataset(path, nx: int = 128, ny: int = 128, nt: int = 300,
                  x_end: float = 1.0, y_end: float = 1.0,
                  cache: bool = True, limit: int | None = None,
-                 workers: int | None = None):
+                 workers: int | None = None,
+                 drop_first_steps: int = 0):
     """Load converted 3D NPZ sims onto a common quarter-disk grid.
 
     Returns (x_canon, y_canon, [Simulation]). The number of returned sims
@@ -749,9 +789,17 @@ def load_dataset(path, nx: int = 128, ny: int = 128, nt: int = 300,
     rest are loaded normally. The loader raises only if zero sims pass.
 
     Cache hits never spawn workers; cache is keyed on
-    (nx, ny, nt) plus the (loaded U skipped) basenames recorded in the
-    cache file, so adding or removing an NPZ in the folder forces a
-    rebuild.
+    (nx, ny, nt, drop_first_steps) plus the (loaded U skipped) basenames
+    recorded in the cache file, so adding or removing an NPZ in the
+    folder OR changing the drop count forces a rebuild.
+
+    drop_first_steps: count of leading waferData steps to discard at
+    load time. The current 3D converter keeps a long pre-contact
+    equilibration step (step_0000) whose samples span ~99% of tReal
+    but carry almost no signal; setting drop_first_steps=1 cuts that
+    dead zone before canonicalize so the canonical time grid lands
+    entirely on the bonding event. Default 0 preserves the no-drop
+    behaviour for any downstream that wants the full trajectory.
     """
     folder = Path(path)
     if not folder.is_dir():
@@ -764,7 +812,11 @@ def load_dataset(path, nx: int = 128, ny: int = 128, nt: int = 300,
 
     x_canon, y_canon = canonical_grid(nx, ny, x_end, y_end)
     t_canon = np.linspace(0.0, 1.0, nt)
-    cache_path = folder / f"{_CACHE_PREFIX}{nx}x{ny}x{nt}.npz"
+    # Cache key includes drop_first_steps so the no-drop and
+    # drop-step-0 outputs never collide. Suffix is suppressed when
+    # drop=0 so pre-existing caches keep their original filename.
+    suffix = "" if drop_first_steps == 0 else f"_drop{drop_first_steps}"
+    cache_path = folder / f"{_CACHE_PREFIX}{nx}x{ny}x{nt}{suffix}.npz"
 
     for stale in folder.glob(f"{_CACHE_PREFIX}*.tmp.npz"):
         try:
@@ -787,7 +839,8 @@ def load_dataset(path, nx: int = 128, ny: int = 128, nt: int = 300,
             return cached
 
     F, meta, skip_log = _build(files, x_canon, y_canon, t_canon,
-                               workers=workers)
+                               workers=workers,
+                               drop_first_steps=drop_first_steps)
 
     if not meta:
         raise RuntimeError(

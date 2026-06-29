@@ -77,6 +77,13 @@ class DataConfig:
     # 64-core server where the unbounded default oversubscribes BLAS
     # threads and slows things down: --data.workers 32 is often best.
     workers: int | None = None
+    # Count of leading waferData steps the loader should discard before
+    # canonicalize. The 3D converter keeps a pre-contact equilibration
+    # step (step_0000) whose samples span ~99% of tReal but carry near
+    # zero signal -- uniform canonical resample then collapses the real
+    # bonding event into a handful of canonical t-indices. Set to 1 for
+    # the firehorse2 / similar datasets; 0 to disable trim.
+    drop_first_steps: int = 0
     oversample_tmax_above: float | None = None
     oversample_factor: int = 1
     oversample_source_substring: str | None = None
