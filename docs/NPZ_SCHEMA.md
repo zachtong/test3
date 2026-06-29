@@ -291,29 +291,99 @@ No co-moving shift, no sPOD, no front-channel target. The basis fitted in
 read but is NOT part of `sim.f` and NOT predicted by the model in this
 phase.
 
+### 5.4 Skip-tolerant policy: bad NPZ files are skipped, not fatal
+
+Re-running the COMSOL converter is expensive enough that the dataset
+folder is allowed to contain a few "bad" NPZs -- files that open as zip
+archives but are internally inconsistent (e.g. `skipped_step_count > 0`
+because the converter dropped an internal step whose d3/d6/d2 shape did
+not match the coordinate count; on-disk `step_*` prefix count less than
+`num_wafer_steps`; an array shape that does not match its scalar count).
+The loader, the cache builder, the trainer, and the inspector all treat
+these files as bad simulations to be skipped, NOT as errors that abort
+the whole dataset.
+
+Concretely:
+
+- `data/loader.py::preflight_npz(path) -> (ok, reason)` is the single
+  source of truth for "is this NPZ usable". The full invariant list is
+  in section 6 below.
+- `data/loader.py::load_dataset` runs preflight on every NPZ in the
+  folder; failures go into a `skip_log` with their reason; successes go
+  through the existing canonicalize pipeline. The returned sims list
+  contains only the good ones, so `len(sims) <= len(folder NPZ files)`.
+  The skip log is printed to stdout (grouped by reason head) and is
+  persisted in the loader cache.
+- A run with zero good NPZs raises `RuntimeError` -- the only condition
+  under which the loader fails outright. Any partial-success path is
+  expected and supported.
+- The loader cache records BOTH `basenames` (loaded set) and
+  `skipped_files` + `skip_reasons`. A cache hit requires
+  `(loaded U skipped) == current folder NPZ file set`; if the folder
+  changes (new NPZ shows up, or one disappears) the cache is rebuilt.
+  This makes the cache stable across re-runs even when some files were
+  skipped.
+- The inspector `scripts/inspect_npz.py` runs in two modes: Mode 1
+  scans every NPZ in the folder and reports OK / BAD per file (it does
+  NOT abort at the first bad one); Mode 2 picks the first `--n` files
+  that pass preflight and exercises the canonicalize pipeline on them
+  to time the build and render snapshot panels.
+
 ## 6. Validation rules the loader enforces
 
-When reading one NPZ, the loader must:
+`preflight_npz` runs these checks in order; the first failure short-
+circuits with a one-line reason and the file is marked for skip. A pass
+through every check means the loader will canonicalize the file
+normally.
 
-- Treat `num_samples` as the authoritative S; cross-check that
-  `sample_step_index.shape == (S,)` and that the maximum step index is
-  `< num_wafer_steps` (the converted count, NOT
-  `num_original_wafer_steps`).
-- For each step encountered: read `coordinates_upper`, verify
-  `coords.shape[1] == num_upper_points`, and that all points satisfy
-  `x >= 0` and `y >= 0` within a small tolerance. A negative coordinate
-  is a converter or schema error.
-- Build a single Delaunay triangulation (via SciPy
-  `LinearNDInterpolator`) per step and reuse it for every time index in
-  that step.
-- After concatenating samples across steps, normalize the global time
+1. Open as an NPZ archive at all (`np.load` does not raise).
+2. Required keys present: `num_samples`, `num_wafer_steps`,
+   `last_step_removed`, plus all of `sample_step_index`,
+   `sample_time_index_within_step`, `sample_tReal`,
+   `sample_bonding_front`.
+3. Trim-last-step: `last_step_removed == True`, and when
+   `num_original_wafer_steps` is recorded,
+   `num_original_wafer_steps == num_wafer_steps + 1`.
+4. No-skip policy: `skipped_step_count == 0` and
+   `num_valid_wafer_steps == num_wafer_steps` (these checks fire only
+   when the corresponding key is present).
+5. On-disk step prefix count: counting `step_*_tReal` keys must give
+   exactly `num_wafer_steps`. Catches the most common bad-converter
+   mode (an internal step gets dropped, prefix count < count claimed).
+6. Every documented `sample_*` array has shape `(num_samples,)`.
+7. `sample_step_index.max() < num_wafer_steps` so every sample resolves
+   to a step that actually exists on disk.
+8. Per-step shape: for each `i` in `range(num_wafer_steps)`, every
+   array under `step_{i:04d}_*` has shape consistent with the step's
+   scalar counts T_i, N_upper_i, N_lower_i (the eight arrays in
+   section 2.1).
+9. `num_samples == sum_i T_i` over converted steps -- the strongest
+   guarantee that step-wise and sample-wise data are in sync.
+10. Quarter-disk: every step's `coordinates_upper[0]` and `[1]` are
+    `>= 0` within `1e-6` tolerance.
+11. `sample_tReal` monotonicity: the largest backward jump (negative
+    `np.diff`) must not exceed `_TREAL_BACKWARD_FACTOR * typ_dt`, where
+    `typ_dt` is the median forward dt across all samples. The default
+    factor is 10 (constant at the top of `data/loader.py`), which
+    tolerates the few-sub-step overlaps that real waferData boundaries
+    routinely produce while still flagging files where the converter
+    glued the steps together in the wrong order. A failure reports the
+    observed magnitude and `typ_dt` so the operator can decide whether
+    to bump the factor or treat the file as truly broken.
+
+When the file passes, the loader's canonicalize stage (per sim):
+
+- Builds a single Delaunay triangulation (via SciPy
+  `LinearNDInterpolator`) per step and reuses it for every time index
+  in that step.
+- After concatenating samples across steps, normalizes the global time
   axis via `s = (tReal - tReal.min()) / (tReal.max() - tReal.min())`.
   At step boundaries `s` can have duplicate or sub-step-overlap values;
   follow the 2D pattern: `np.unique` collapses exact duplicates, and a
-  backward jump larger than the median forward `dt` aborts the load
-  with a clear error.
-- Interpolate the canonicalized (Nx, Ny) frames onto the canonical time
-  grid `t_canon = np.linspace(0, 1, Nt)` using row-wise linear
+  backward jump larger than the median forward `dt` aborts that
+  individual sim (caught by the safe wrapper, logged as a skip).
+- Interpolates the canonicalized (Nx, Ny) frames onto the canonical
+  time grid `t_canon = np.linspace(0, 1, Nt)` using row-wise linear
   interpolation. Off-disk cells stay zero throughout.
 
 ## 7. Loader pipeline summary

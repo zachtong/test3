@@ -174,3 +174,64 @@ def make_mock_3d_npz(out_path: Path,
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
     np.savez(out_path, **payload)
+
+
+def make_bad_3d_npz(out_path,
+                    mode: str = "nonzero_skipped",
+                    **mock_kwargs) -> None:
+    """Build a converted-NPZ fixture that should FAIL `preflight_npz`.
+
+    Mirrors the kinds of broken-but-zip-valid NPZs the real converter is
+    known to emit (per the converter author's note: some files have
+    internal step skipped because of d3/d6/d2 vs coordinate-count
+    mismatches). Used by the skip-tolerance tests.
+
+    Modes (each sabotages exactly one invariant):
+      'nonzero_skipped'    -- skipped_step_count = 1
+      'missing_step'       -- drop every step_0001_* key (prefix gap)
+      'wrong_disp_shape'   -- displacement_z_corrected_upper has wrong shape
+      'bad_quadrant'       -- step_0000_coordinates_upper has a negative x
+      'sample_shape_off'   -- sample_tReal length != num_samples
+      'last_step_kept'     -- last_step_removed = False
+      'treal_huge_back'    -- inject a backward jump in sample_tReal that
+                              exceeds _TREAL_BACKWARD_FACTOR * typ_dt
+    """
+    make_mock_3d_npz(out_path, **mock_kwargs)
+    with np.load(out_path, allow_pickle=True) as z:
+        payload = {k: z[k] for k in z.files}
+
+    if mode == "nonzero_skipped":
+        payload["skipped_step_count"] = np.int64(1)
+    elif mode == "missing_step":
+        # require at least 2 steps to drop the second
+        keys_to_drop = [k for k in payload if k.startswith("step_0001_")]
+        if not keys_to_drop:
+            raise ValueError("missing_step needs n_steps >= 2 in mock")
+        for k in keys_to_drop:
+            payload.pop(k)
+        # but leave num_wafer_steps unchanged: now prefix count < nws
+    elif mode == "wrong_disp_shape":
+        # Drop one column so the array doesn't match num_upper_points.
+        bad = payload["step_0000_displacement_z_corrected_upper"]
+        payload["step_0000_displacement_z_corrected_upper"] = bad[:, :-1]
+    elif mode == "bad_quadrant":
+        payload["step_0000_coordinates_upper"][0, 0] = -0.5
+    elif mode == "sample_shape_off":
+        # Shrink sample_tReal to length S - 1; sample_step_index stays right.
+        payload["sample_tReal"] = payload["sample_tReal"][:-1]
+    elif mode == "last_step_kept":
+        payload["last_step_removed"] = np.bool_(False)
+    elif mode == "treal_huge_back":
+        # Take the last sample and shove its time backward by 50x the
+        # typical dt -- well past the relaxed factor of 10x. tReal is
+        # otherwise monotonic in the mock so the median forward dt is
+        # well-defined.
+        treal = payload["sample_tReal"].copy()
+        dt = np.diff(treal)
+        typ_dt = float(np.median(dt[dt > 0])) if (dt > 0).any() else 0.01
+        treal[-1] = treal[-2] - 50.0 * typ_dt
+        payload["sample_tReal"] = treal
+    else:
+        raise ValueError(f"unknown sabotage mode {mode!r}")
+
+    np.savez(out_path, **payload)

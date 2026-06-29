@@ -22,8 +22,8 @@ _root = Path(__file__).resolve().parent.parent
 if str(_root) not in sys.path:
     sys.path.insert(0, str(_root))
 
-from tests.mock_data import make_mock_3d_npz                # noqa: E402
-from data.loader import load_dataset                        # noqa: E402
+from tests.mock_data import make_mock_3d_npz, make_bad_3d_npz   # noqa: E402
+from data.loader import load_dataset, preflight_npz            # noqa: E402
 from core.sensors import SensorConfig, place_sensors, sensor_indices  # noqa: E402
 from core.pod_basis import PODBasis                         # noqa: E402
 from core.grid import canonical_grid                        # noqa: E402
@@ -114,7 +114,8 @@ def test_trim_last_step_metadata(fixture_folder):
 
 
 def test_quarter_validation(tmp_path):
-    """A sim with a negative-x native coord must abort the load."""
+    """A single sim with negative-x native coords now becomes a skip-with-
+    reason; load_dataset raises RuntimeError because zero sims load."""
     folder = tmp_path / "bad_quadrant"
     folder.mkdir()
     p = folder / "data_00000000.npz"
@@ -125,5 +126,132 @@ def test_quarter_validation(tmp_path):
         payload = {k: z[k] for k in z.files}
     payload["step_0000_coordinates_upper"][0, 0] = -0.5
     np.savez(p, **payload)
-    with pytest.raises(ValueError, match="first quadrant"):
+    with pytest.raises(RuntimeError, match="passed preflight"):
         load_dataset(folder, nx=16, ny=16, nt=8, cache=False, workers=1)
+
+
+def _good_mock_kwargs():
+    """Standard 'good' fixture kwargs reused across skip-tolerance tests."""
+    return dict(n_steps=2, t_per_step=(5, 4),
+                n_upper_per_step=(40, 50), n_lower_per_step=(30, 40))
+
+
+@pytest.mark.parametrize("mode", [
+    "nonzero_skipped", "missing_step", "wrong_disp_shape",
+    "bad_quadrant", "sample_shape_off", "last_step_kept",
+    "treal_huge_back",
+])
+def test_preflight_rejects_each_sabotage(tmp_path, mode):
+    """Every documented bad-mode must fail preflight with a non-empty reason.
+
+    Drives `make_bad_3d_npz` through every sabotage mode and asserts
+    `preflight_npz` returns (False, reason). This is the contract the
+    skip-tolerant loader depends on: if preflight ever silently passed a
+    broken file, that file would crash _build_one inside a worker and
+    take down the whole cache build.
+    """
+    p = tmp_path / "bad.npz"
+    make_bad_3d_npz(p, mode=mode, **_good_mock_kwargs())
+    ok, reason = preflight_npz(p)
+    assert ok is False, f"mode={mode} unexpectedly passed preflight"
+    assert reason and isinstance(reason, str)
+
+
+def test_preflight_accepts_clean(tmp_path):
+    """The standard good fixture must pass preflight."""
+    p = tmp_path / "good.npz"
+    make_mock_3d_npz(p, **_good_mock_kwargs())
+    ok, reason = preflight_npz(p)
+    assert ok is True, f"good fixture rejected: {reason}"
+
+
+def test_preflight_tolerates_small_treal_overlap(tmp_path):
+    """A backward jump of a few sub-step samples must NOT fail preflight.
+
+    Real waferData boundaries can overlap by several timesteps (the
+    converter writes the last few samples of step i and the first sample
+    of step i+1 at nearly the same physical time). With
+    _TREAL_BACKWARD_FACTOR = 10 this should still pass; the old
+    'one-timestep' policy used to reject it.
+    """
+    p = tmp_path / "small_overlap.npz"
+    make_mock_3d_npz(p, **_good_mock_kwargs())
+    with np.load(p, allow_pickle=True) as z:
+        payload = {k: z[k] for k in z.files}
+    treal = payload["sample_tReal"].copy()
+    dt = np.diff(treal)
+    typ_dt = float(np.median(dt[dt > 0]))
+    # Move the last sample back by 3 * typ_dt (within the 10x window).
+    treal[-1] = treal[-2] - 3.0 * typ_dt
+    payload["sample_tReal"] = treal
+    np.savez(p, **payload)
+    ok, reason = preflight_npz(p)
+    assert ok is True, f"small overlap unexpectedly rejected: {reason}"
+
+
+def test_load_dataset_skips_bad_keeps_good(tmp_path):
+    """Mixed folder: 2 good + 2 bad NPZs -> load_dataset returns 2 sims.
+
+    Covers the core skip-tolerant contract: a bad NPZ alongside good ones
+    must not abort the load. The good sims' params['basename'] are checked
+    against the actual good filenames to make sure we didn't accidentally
+    keep one of the bad ones.
+    """
+    folder = tmp_path / "mixed"
+    folder.mkdir()
+    make_mock_3d_npz(folder / "good_00.npz", **_good_mock_kwargs())
+    make_mock_3d_npz(folder / "good_01.npz", **_good_mock_kwargs())
+    make_bad_3d_npz(folder / "bad_00.npz", mode="nonzero_skipped",
+                    **_good_mock_kwargs())
+    make_bad_3d_npz(folder / "bad_01.npz", mode="missing_step",
+                    **_good_mock_kwargs())
+    x, y, sims = load_dataset(folder, nx=16, ny=16, nt=8, cache=False,
+                              workers=1)
+    assert len(sims) == 2
+    names = sorted(s.params["basename"] for s in sims)
+    assert names == ["good_00.npz", "good_01.npz"]
+
+
+def test_load_dataset_zero_good_raises(tmp_path):
+    """Folder full of bad NPZs -> RuntimeError mentioning preflight."""
+    folder = tmp_path / "all_bad"
+    folder.mkdir()
+    make_bad_3d_npz(folder / "bad_00.npz", mode="nonzero_skipped",
+                    **_good_mock_kwargs())
+    make_bad_3d_npz(folder / "bad_01.npz", mode="last_step_kept",
+                    **_good_mock_kwargs())
+    with pytest.raises(RuntimeError, match="passed preflight"):
+        load_dataset(folder, nx=16, ny=16, nt=8, cache=False, workers=1)
+
+
+def test_cache_records_skip_log(tmp_path):
+    """Cache round-trip must preserve both loaded sims and the skip log.
+
+    The skip log governs the cache-hit decision: on a re-run the loader
+    must reproduce the same skip outcome from cache without re-running
+    preflight on the bad files. If the cache forgets the skipped files,
+    the (loaded U skipped) == folder-files check would fail and the
+    cache would (wastefully) get rebuilt every run.
+    """
+    folder = tmp_path / "mixed_cached"
+    folder.mkdir()
+    make_mock_3d_npz(folder / "good_00.npz", **_good_mock_kwargs())
+    make_bad_3d_npz(folder / "bad_00.npz", mode="nonzero_skipped",
+                    **_good_mock_kwargs())
+    # First call: builds cache + writes skip log.
+    x1, y1, sims_a = load_dataset(folder, nx=16, ny=16, nt=8,
+                                  cache=True, workers=1)
+    assert len(sims_a) == 1
+    cache_path = folder / "_loader_cache_16x16x8.npz"
+    assert cache_path.exists()
+    with np.load(cache_path, allow_pickle=True) as z:
+        assert "skipped_files" in z.files
+        assert "skip_reasons" in z.files
+        assert list(map(str, z["skipped_files"])) == ["bad_00.npz"]
+        assert list(map(str, z["basenames"])) == ["good_00.npz"]
+    # Second call: cache hit, returns identical sims, doesn't re-run build.
+    x2, y2, sims_b = load_dataset(folder, nx=16, ny=16, nt=8,
+                                  cache=True, workers=1)
+    assert len(sims_b) == 1
+    assert sims_a[0].params["basename"] == sims_b[0].params["basename"]
+    assert np.allclose(sims_a[0].f, sims_b[0].f)
