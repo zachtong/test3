@@ -34,6 +34,9 @@ A verdict line classifies:
     python scripts/diagnose_time_density.py /path/to/3d_npz_folder
     python scripts/diagnose_time_density.py /path/to/one_sim.npz \\
         --out /tmp/density.png
+    # multi-sim summary mode (one row per sim, no figure):
+    python scripts/diagnose_time_density.py /path/to/3d_npz_folder \\
+        --scan 20
 """
 
 from __future__ import annotations
@@ -199,15 +202,152 @@ def diagnose(path: Path, out_path: Path) -> int:
     return 0
 
 
+def summarize_one(path: Path) -> dict:
+    """Compact stats for one NPZ; one row of the --scan summary table."""
+    with np.load(path, allow_pickle=True) as z:
+        treal = np.asarray(z["sample_tReal"], dtype=np.float64)
+        S = int(z["num_samples"])
+        contact = (z["contactTime"].item()
+                   if "contactTime" in z.files else float("nan"))
+        rel_lw = (z["releaseTime_LW"].item()
+                  if "releaseTime_LW" in z.files else float("nan"))
+        rel_uw = (z["releaseTime_UW"].item()
+                  if "releaseTime_UW" in z.files else float("nan"))
+    span = float(treal.max() - treal.min())
+    s = (treal - treal.min()) / span if span > 0 else treal * 0
+    dt = np.diff(treal)
+    fwd = dt[dt > 0]
+    edges20 = np.linspace(0.0, 1.0, 21)
+    counts20, _ = np.histogram(s, bins=edges20)
+    densest = int(np.argmax(counts20))
+    return dict(
+        name=path.name, S=S, span=span,
+        dt_min=float(fwd.min()) if fwd.size else float("nan"),
+        dt_max=float(fwd.max()) if fwd.size else float("nan"),
+        ratio=(float(fwd.max() / fwd.min())
+               if fwd.size and fwd.min() > 0 else float("inf")),
+        dense_lo=float(edges20[densest]),
+        dense_hi=float(edges20[densest + 1]),
+        dense_frac=float(counts20[densest] / max(S, 1)),
+        contactTime=contact, releaseTime_LW=rel_lw, releaseTime_UW=rel_uw,
+        contactTime_norm=((contact - treal.min()) / span
+                          if (np.isfinite(contact) and span > 0)
+                          else float("nan")),
+    )
+
+
+def scan_summary(folder: Path, n_scan: int) -> int:
+    """Scan up to `n_scan` preflight-passing NPZs in folder; print a
+    one-row-per-sim summary table + aggregate verdict.
+
+    The columns let the operator answer at a glance:
+      - is the per-sim adaptive-step pattern consistent across sims?
+      - where does the dense window sit (always near s=1, or moving)?
+      - is contactTime metadata in the same units as tReal (i.e. is
+        contactTime/span sensible) and where does it land in s?
+    """
+    files = sorted(p for p in folder.glob("*.npz")
+                   if not p.name.startswith("_"))
+    scanned: list[dict] = []
+    for p in files:
+        ok, _ = preflight_npz(p)
+        if not ok:
+            continue
+        scanned.append(summarize_one(p))
+        if len(scanned) >= n_scan:
+            break
+    if not scanned:
+        print(f"no preflight-passing NPZ in {folder}")
+        return 1
+
+    print(f"\n=== scan summary across {len(scanned)} sim(s) "
+          f"(of {len(files)} total in folder) ===\n")
+    hdr = (f"  {'basename':<38}  {'S':>5}  {'span':>8}  "
+           f"{'dt_min':>9}  {'dt_max':>8}  {'ratio':>8}  "
+           f"{'dense':<14}  {'dense%':>7}  "
+           f"{'contact':>9}  {'contact_s':>9}")
+    print(hdr)
+    print(f"  {'-' * (len(hdr) - 2)}")
+    for r in scanned:
+        dense_str = f"[{r['dense_lo']:.2f},{r['dense_hi']:.2f})"
+        print(f"  {r['name'][:38]:<38}  {r['S']:>5d}  "
+              f"{r['span']:>8.3g}  {r['dt_min']:>9.2e}  "
+              f"{r['dt_max']:>8.2e}  {r['ratio']:>8.1e}  "
+              f"{dense_str:<14}  {100*r['dense_frac']:>6.1f}%  "
+              f"{r['contactTime']:>9.3g}  "
+              f"{r['contactTime_norm']:>9.3f}")
+
+    print("\n[aggregate]")
+    spans = np.array([r["span"] for r in scanned])
+    ratios = np.array([r["ratio"] for r in scanned if np.isfinite(r["ratio"])])
+    dense_fracs = np.array([r["dense_frac"] for r in scanned])
+    dense_los = np.array([r["dense_lo"] for r in scanned])
+    contacts = np.array([r["contactTime"] for r in scanned])
+    contact_norms = np.array([r["contactTime_norm"] for r in scanned
+                              if np.isfinite(r["contactTime_norm"])])
+    print(f"  tReal span:        median={np.median(spans):.3g}  "
+          f"min={spans.min():.3g}  max={spans.max():.3g}")
+    if ratios.size:
+        print(f"  dt max/min ratio:  median={np.median(ratios):.1e}  "
+              f"min={ratios.min():.1e}  max={ratios.max():.1e}")
+    print(f"  densest 5% frac:   median={100*np.median(dense_fracs):.1f}%  "
+          f"min={100*dense_fracs.min():.1f}%  "
+          f"max={100*dense_fracs.max():.1f}%")
+    print(f"  densest window lo: median={np.median(dense_los):.2f}  "
+          f"min={dense_los.min():.2f}  max={dense_los.max():.2f}  "
+          f"(where the dense bonding-event region begins on s in [0, 1])")
+    if np.isfinite(contacts).any():
+        cf = contacts[np.isfinite(contacts)]
+        print(f"  contactTime:       median={np.median(cf):.3g}  "
+              f"min={cf.min():.3g}  max={cf.max():.3g}")
+    if contact_norms.size:
+        print(f"  contactTime as s:  median={np.median(contact_norms):.3f}  "
+              f"min={contact_norms.min():.3f}  "
+              f"max={contact_norms.max():.3f}")
+        print("     (fraction of total tReal at which physical contact "
+              "begins; should equal the dense window's left edge if the "
+              "bonding event begins at contact and tReal is in the same "
+              "units as contactTime)")
+
+    print("\n[units sanity]")
+    span_med = float(np.median(spans))
+    if span_med > 200:
+        print(f"  tReal span median {span_med:.0f} is much larger than a")
+        print("  typical wafer-bonding event (~10-100 s). Most likely the")
+        print("  sim includes a long pre-contact equilibration phase. If")
+        print(f"  contactTime (median {np.median(cf):.0f} if reported) is")
+        print(f"  on the same order as the span and lands near the dense")
+        print(f"  window's left edge (median {np.median(dense_los):.2f}),")
+        print("  units are consistent (seconds) and the pre-contact tail")
+        print("  is just dead data the trim option (B) would drop.")
+    elif 5 < span_med < 200:
+        print(f"  tReal span median {span_med:.0f} matches typical bonding")
+        print("  duration; units look like seconds and there is no")
+        print("  pre-contact tail to trim.")
+    else:
+        print(f"  tReal span median {span_med:.0f} is suspiciously small;")
+        print("  consider whether units could be ms or some scaled time.")
+    return 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("path", help="folder of NPZs or single .npz file")
     ap.add_argument("--out", default=None,
                     help="output PNG path (default: "
                     "<path-parent>/diagnose_out/<stem>_time_density.png)")
+    ap.add_argument("--scan", type=int, default=0,
+                    help="scan N preflight-passing NPZs and print a "
+                    "one-row-per-sim summary table + aggregate stats "
+                    "(no figure). Default 0 = single-sim verbose mode.")
     args = ap.parse_args()
 
     p = Path(args.path).expanduser().resolve()
+    if args.scan > 0:
+        if not p.is_dir():
+            print(f"--scan requires a folder, got {p}", file=sys.stderr)
+            return 2
+        return scan_summary(p, args.scan)
     if p.is_dir():
         picked = _pick_one(p)
         if picked is None:
