@@ -67,6 +67,7 @@ if str(_root) not in sys.path:
 
 
 VIZ_NAMES = ("diversity", "topdown", "kymo", "interactive",
+             "gif_3d", "strip_3d",
              "pod_spectrum", "pod_mode_atlas",
              "err_vs_floor", "ak_scatter", "worst")
 # Names that need --tag (training-run dependent)
@@ -192,6 +193,11 @@ def main() -> int:
     ap.add_argument("--diversity-limit", type=int, default=None,
                     help="cap on sims used for diversity viz; full "
                     "folder by default")
+    ap.add_argument("--show-lower", action="store_true",
+                    help="draw the flat lower-wafer reference plane on "
+                    "all 3D viz (gif_3d, strip_3d, interactive). "
+                    "Default off because the plane dominates the "
+                    "figure; turn on for talks where the gap matters.")
     ap.add_argument("--workers", type=int, default=None,
                     help="loader worker count for folder-level viz "
                     "(diversity). None lets the loader auto-pick "
@@ -263,18 +269,24 @@ def main() -> int:
     # HTML stays as a subprocess because plotly is an optional dep
     # we lazy-import only when needed.
     sims_picked = []
-    if any(v in enabled for v in ("topdown", "kymo", "interactive")):
+    _per_sim_inproc = {"topdown", "kymo", "gif_3d", "strip_3d"}
+    if any(v in enabled for v in ("topdown", "kymo", "interactive",
+                                    "gif_3d", "strip_3d")):
         sims_picked = _pick_sims(folder, args.n_samples, args.select,
                                  args.tag, args.output_dir)
         if not sims_picked:
             print("WARN: 0 preflight-passing NPZ for per-sim viz",
                   file=sys.stderr)
-        # In-process imports -- only needed if we are doing topdown/kymo.
-        if {"topdown", "kymo"} & enabled:
+        # In-process imports -- only needed if at least one in-process
+        # viz is enabled. Lazy-imported so a user who only wants
+        # interactive HTML doesn't pay the matplotlib startup cost.
+        if _per_sim_inproc & enabled:
             from data.loader import load_dataset
             from core.sensors import SensorConfig, place_sensors
             from scripts.viz_topdown_gif import render_topdown_gif
             from scripts.viz_radial_kymograph import render_radial_kymograph
+            from scripts.viz_3d_gif import render_3d_gif
+            from scripts.viz_3d_strip import render_3d_strip
             import shutil as _shutil
             import tempfile as _tempfile
             # Sensor positions (lab rig default)
@@ -287,14 +299,20 @@ def main() -> int:
             sim_dir = out_root / "per_sim" / sim_stem
             sim_dir.mkdir(parents=True, exist_ok=True)
 
-            # Figure out which of {topdown, kymo} need rendering for
-            # THIS sim (skip-existing applies per-target).
+            # Figure out which of {topdown, kymo, gif_3d, strip_3d}
+            # need rendering for THIS sim (skip-existing per-target).
             tgt_topdown = sim_dir / "topdown.gif"
             tgt_kymo = sim_dir / "kymo.png"
+            tgt_gif3d = sim_dir / "wafer_3d.gif"
+            tgt_strip3d = sim_dir / "wafer_3d_strip.png"
             need_topdown = ("topdown" in enabled
                             and (args.force or not tgt_topdown.exists()))
             need_kymo = ("kymo" in enabled
                          and (args.force or not tgt_kymo.exists()))
+            need_gif3d = ("gif_3d" in enabled
+                          and (args.force or not tgt_gif3d.exists()))
+            need_strip3d = ("strip_3d" in enabled
+                            and (args.force or not tgt_strip3d.exists()))
 
             # Skip-existing accounting (logged even when no work done)
             if "topdown" in enabled and not need_topdown:
@@ -303,9 +321,15 @@ def main() -> int:
             if "kymo" in enabled and not need_kymo:
                 log.append((tgt_kymo, "skipped", 0.0,
                             "target exists, --force to overwrite"))
+            if "gif_3d" in enabled and not need_gif3d:
+                log.append((tgt_gif3d, "skipped", 0.0,
+                            "target exists, --force to overwrite"))
+            if "strip_3d" in enabled and not need_strip3d:
+                log.append((tgt_strip3d, "skipped", 0.0,
+                            "target exists, --force to overwrite"))
 
             # Load the sim only if at least one in-process viz is wanted.
-            if need_topdown or need_kymo:
+            if need_topdown or need_kymo or need_gif3d or need_strip3d:
                 print(f"\n[in-process] loading {sim_path.name} ...",
                       flush=True)
                 t_load = time.time()
@@ -349,6 +373,36 @@ def main() -> int:
                     except Exception as e:                  # noqa: BLE001
                         log.append((tgt_kymo, "FAIL",
                                     time.time() - t0, f"{type(e).__name__}: {e}"))
+                if need_gif3d:
+                    t0 = time.time()
+                    try:
+                        render_3d_gif(
+                            sim, x_canon, y_canon, sensor_xy, tgt_gif3d,
+                            show_lower=args.show_lower,
+                            value_scale=args.value_scale,
+                            sim_id=sim_stem, tag=args.tag,
+                            drop_first_steps=args.drop_first_steps)
+                        log.append((tgt_gif3d, "ok",
+                                    time.time() - t0, "in-process"))
+                    except Exception as e:                  # noqa: BLE001
+                        log.append((tgt_gif3d, "FAIL",
+                                    time.time() - t0,
+                                    f"{type(e).__name__}: {e}"))
+                if need_strip3d:
+                    t0 = time.time()
+                    try:
+                        render_3d_strip(
+                            sim, x_canon, y_canon, sensor_xy, tgt_strip3d,
+                            show_lower=args.show_lower,
+                            value_scale=args.value_scale,
+                            sim_id=sim_stem, tag=args.tag,
+                            drop_first_steps=args.drop_first_steps)
+                        log.append((tgt_strip3d, "ok",
+                                    time.time() - t0, "in-process"))
+                    except Exception as e:                  # noqa: BLE001
+                        log.append((tgt_strip3d, "FAIL",
+                                    time.time() - t0,
+                                    f"{type(e).__name__}: {e}"))
 
             # Interactive HTML stays a subprocess (plotly is optional)
             if "interactive" in enabled:
@@ -358,6 +412,7 @@ def main() -> int:
                        "--out", str(target),
                        *common_grid,
                        *(["--tag", args.tag] if args.tag else []),
+                       *(["--show-lower"] if args.show_lower else []),
                        "--value-scale", str(args.value_scale)]
                 _run(cmd, target, args.force, log)
 

@@ -39,10 +39,20 @@ Outputs land under:
 ```
 viz/<your_name>/
   diversity.png
-  per_sim/<sim_basename>/{topdown.gif, kymo.png, interactive.html}
+  per_sim/<sim_basename>/
+    topdown.gif          # 2D top-down (full disk, D2 mirror)
+    kymo.png             # radial-slice trio at theta=0/45/90 (quarter)
+    wafer_3d.gif         # 3D surface animation (full disk)
+    wafer_3d_strip.png   # 3D snapshots at t=0/mid/final (full disk)
+    interactive.html     # 3D Plotly (rotate / zoom / time slider)
   pod/{spectrum.png, mode_atlas.png}              # if --tag
   ml/{err_vs_floor.png, err_vs_floor_a6.png, ak_scatter.png}  # if --tag
   worst/0001_*.png ...                            # if --tag
+```
+
+Add the flat lower-wafer reference plane to ALL 3D viz in one shot:
+```bash
+python scripts/viz_all.py --npz-dir <folder> --out viz/<tag> --show-lower
 ```
 
 See individual sections below for the manual single-script equivalents
@@ -98,6 +108,11 @@ your data folder.
 | Add a raw-NPZ debug panel on the left (step_0000) | `... --include-raw` | (off by default; step_0000 is the pre-contact equilibration step, mostly near-zero) |
 | 3D-kymograph trio (3 radial slices at theta=0/45/90) -- TALK HERO | `python scripts/viz_radial_kymograph.py --sim <sim> --out viz/kymo.png` | PNG ~100 KB |
 | Interactive 3D surface (browser, rotate / zoom / hover / time-slider) | `python scripts/viz_interactive.py --sim <sim> --out viz/sim.html` | HTML ~10-25 MB |
+| Same + flat lower-wafer reference plane (talks where gap matters) | `... --show-lower` | HTML, same size |
+| 3D animated GIF of bonding process (embed in PPT / talk) | `python scripts/viz_3d_gif.py --sim <sim> --out viz/sim_3d.gif` | GIF ~1-3 MB |
+| Same + lower wafer + custom camera (top-down isometric) | `... --show-lower --elev 80 --azim -90` | GIF |
+| 3D static snapshot strip (3 panels: t=0/mid/final) -- PAPER FIG | `python scripts/viz_3d_strip.py --sim <sim> --out viz/sim_3d_strip.png` | PNG ~200 KB |
+| Same + lower wafer reference | `... --show-lower` | PNG |
 
 For viz_topdown_gif, default `--drop-first-steps 0` shows the raw
 pre-contact step too (debugging-friendly); pass `--drop-first-steps 1`

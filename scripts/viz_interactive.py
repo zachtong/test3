@@ -41,6 +41,7 @@ from scripts.fieldviz import (mirror_d2, compute_bonded_mask,  # noqa: E402
                                front_radius_per_t,
                                wafer_value_range,
                                wafer_cmap_to_plotly)
+from scripts.fieldviz.render3d import estimate_lower_z         # noqa: E402
 
 
 def main() -> int:
@@ -61,6 +62,13 @@ def main() -> int:
                     "= metres -> micrometres)")
     ap.add_argument("--sensors", default="3-edge",
                     help="'3-edge' (lab rig) or 'r:th,r:th,...'")
+    ap.add_argument("--show-lower", action="store_true",
+                    help="add a translucent gray reference plane for "
+                    "the lower wafer at z = p5(final-frame u_z). "
+                    "Toggle via the legend in the rendered HTML.")
+    ap.add_argument("--lower-z", type=float, default=None,
+                    help="override the auto-estimated lower wafer z "
+                    "(in metres; only used with --show-lower)")
     ap.add_argument("--tag", default=None)
     args = ap.parse_args()
 
@@ -194,7 +202,30 @@ def main() -> int:
                                                sim_path.name,
                                                args.gap_threshold_um))))
 
-    fig = go.Figure(data=[surface, sensor_trace], frames=frames)
+    # Optional lower-wafer reference plane. Static across frames --
+    # we keep it OUT of frames[i].data so it persists during playback.
+    fig_data = [surface, sensor_trace]
+    if args.show_lower:
+        lower_z = (args.lower_z if args.lower_z is not None
+                   else estimate_lower_z(sim.f.astype(np.float64)))
+        Z_lower = np.full_like(X_full,
+                                lower_z * args.value_scale,
+                                dtype=np.float64)
+        Z_lower[~in_disk] = np.nan
+        lower_trace = go.Surface(
+            x=X_full, y=Y_full, z=Z_lower,
+            surfacecolor=np.zeros_like(Z_lower),
+            colorscale=[[0, "rgb(140, 140, 140)"],
+                         [1, "rgb(140, 140, 140)"]],
+            showscale=False, opacity=0.30,
+            name="lower wafer (reference)",
+            hovertemplate="lower wafer (z constant)<extra></extra>",
+            showlegend=True)
+        fig_data.append(lower_trace)
+        print(f"  lower wafer plane at z = "
+              f"{lower_z * args.value_scale:.3g} "
+              f"(units of value_scale)", flush=True)
+    fig = go.Figure(data=fig_data, frames=frames)
     fig.update_layout(
         title_text=_title(int(frame_idx[0]), nt,
                           front_r[int(frame_idx[0])],
