@@ -85,7 +85,7 @@ def render_topdown_gif(sim: Simulation, x_canon: np.ndarray,
                        sensor_xy: np.ndarray,
                        out_path: Path | str, *,
                        gap_threshold_um: float = 1.0,
-                       norm_mode: str = "per-frame",
+                       norm_mode: str = "per-sim",
                        fps: int = 24,
                        max_frames: int = 120,
                        sim_id: str | None = None,
@@ -149,17 +149,30 @@ def render_topdown_gif(sim: Simulation, x_canon: np.ndarray,
     cbar_c = fig.colorbar(im_canon, ax=ax_canon, shrink=0.85,
                           label="u_z (m)")
 
-    # initial bonded-region contour
+    # initial bonded-region contour.
+    # Bug history: previously this code did
+    #   for c in old_contour.collections: c.remove()
+    # wrapped in try/except: pass. In matplotlib 3.8 ContourSet.collections
+    # was deprecated and in 3.10 removed entirely; the AttributeError got
+    # silently swallowed, so EVERY frame's contour stayed on the axes
+    # and the GIF showed concentric orange rings tracking the bonding
+    # front's entire history. The QuadContourSet object IS an Artist in
+    # modern matplotlib so .remove() on it is the canonical clear.
     contour_handles: list = []
 
+    def _remove_contour(cs) -> None:
+        try:
+            cs.remove()
+            return
+        except (AttributeError, NotImplementedError):
+            pass
+        # Pre-3.8 fallback path; if this also fails we WANT to know.
+        for c in cs.collections:
+            c.remove()
+
     def _redraw_contour(t_idx: int) -> None:
-        for h in contour_handles:
-            try:
-                for c in h.collections:
-                    c.remove()
-            except Exception:
-                pass
-        contour_handles.clear()
+        while contour_handles:
+            _remove_contour(contour_handles.pop())
         if bonded_mirrored[..., t_idx].any():
             cs = ax_canon.contour(
                 x_full, y_full, bonded_mirrored[..., t_idx].T,
@@ -266,12 +279,15 @@ def main() -> int:
     ap.add_argument("--max-frames", type=int, default=120)
     ap.add_argument("--norm-mode",
                     choices=("per-frame", "per-sim"),
-                    default="per-frame",
-                    help="per-frame (default): each frame uses its own "
-                    "vmin/vmax so the curved bonded shape stays visible "
-                    "at every time. per-sim: lock the cmap range across "
-                    "the animation -- use when cross-frame amplitude "
-                    "comparison matters.")
+                    default="per-sim",
+                    help="per-sim (default): lock vmin/vmax across the "
+                    "whole animation so every frame's colour is on the "
+                    "same physical scale (early frames look mostly yellow "
+                    "= near-zero, later frames go purple as the bonded "
+                    "interior descends). per-frame: each frame computes "
+                    "its own vmin/vmax -- useful only when you want to "
+                    "exaggerate within-frame structure regardless of "
+                    "amplitude, NOT for reading the physics off the GIF.")
     ap.add_argument("--include-raw", action="store_true",
                     help="add a second panel that scatters the raw NPZ's "
                     "step_0000 displacement (debug only; step_0000 is "

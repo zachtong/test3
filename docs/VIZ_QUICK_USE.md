@@ -94,7 +94,7 @@ your data folder.
 | Goal | Command | Output |
 |---|---|---|
 | Top-down animation (canonical full disk, sensors + bonded contour) | `python scripts/viz_topdown_gif.py --sim <sim> --out viz/topdown.gif` | GIF ~500 KB |
-| Same but lock the colour scale across frames | `... --norm-mode per-sim` | (default is per-frame so the curved bonded shape is visible at every t) |
+| Override default and let each frame self-scale | `... --norm-mode per-frame` | default is per-sim so amplitude across frames is comparable; per-frame exaggerates within-frame structure but loses physical meaning |
 | Add a raw-NPZ debug panel on the left (step_0000) | `... --include-raw` | (off by default; step_0000 is the pre-contact equilibration step, mostly near-zero) |
 | 3D-kymograph trio (3 radial slices at theta=0/45/90) -- TALK HERO | `python scripts/viz_radial_kymograph.py --sim <sim> --out viz/kymo.png` | PNG ~100 KB |
 | Interactive 3D surface (browser, rotate / zoom / hover / time-slider) | `python scripts/viz_interactive.py --sim <sim> --out viz/sim.html` | HTML ~10-25 MB |

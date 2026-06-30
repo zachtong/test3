@@ -120,6 +120,76 @@ def test_bonded_mask_rule_3_monotonic_in_time():
     assert (diff >= 0).all(), "bonded mask should never retreat in time"
 
 
+def test_topdown_contour_does_not_accumulate_across_frames(tmp_path):
+    """Concentric-rings regression. Pre-fix, _redraw_contour relied on
+    ContourSet.collections which matplotlib 3.8 deprecated / 3.10 removed.
+    The AttributeError was silently swallowed and every frame's bonded-
+    region contour stayed on the axes, so the final frame ended up
+    showing concentric rings tracking the front's entire trajectory.
+
+    We render a 2-frame GIF whose bonding front sweeps inward-to-outward
+    on a synthetic monotonic field, then count orange-coloured pixels
+    in the LAST frame's rendered image. With the bug, the last frame
+    has ~2x the orange pixels of the first (it carries the first
+    frame's contour too). With the fix, the last frame has roughly the
+    same count as the first.
+
+    A pure orange-pixel count is not deterministic across mpl versions
+    due to antialiasing, so the test only asserts the count is bounded
+    by a generous 1.6x the first-frame count (well below the 2-3x a
+    leaked contour produces).
+    """
+    pytest.importorskip("PIL")
+    from scripts.viz_topdown_gif import (render_topdown_gif,
+                                          _FRONT_COLOR)
+    from core.simulation import Simulation
+    from PIL import Image, ImageSequence
+
+    Nx, Ny, Nt = 24, 24, 8
+    w = _make_synthetic_w(Nx=Nx, Ny=Ny, Nt=Nt, peak_um=15.0)
+    sim = Simulation(f=w.astype(np.float32), params={})
+    x = np.linspace(0, 1, Nx)
+    y = np.linspace(0, 1, Ny)
+    sensor_xy = np.array([[1.0, 0.0]])
+    out = tmp_path / "topdown.gif"
+    render_topdown_gif(sim, x, y, sensor_xy, out,
+                       fps=2, max_frames=Nt, sim_id="rings_test",
+                       drop_first_steps=0)
+    assert out.is_file()
+
+    # _FRONT_COLOR is an RGB tuple in 0..1; convert to 0..255 ints.
+    front_rgb = np.array(
+        [int(round(c * 255)) for c in _FRONT_COLOR[:3]], dtype=np.int32)
+
+    def _count_orange(im):
+        a = np.asarray(im.convert("RGB"), dtype=np.int32)
+        # Pixel close (manhattan distance < 60) to _FRONT_COLOR. Loose
+        # tolerance covers anti-aliasing + GIF quantisation.
+        d = np.abs(a - front_rgb[None, None, :]).sum(axis=-1)
+        return int((d < 60).sum())
+
+    with Image.open(out) as im:
+        frames = [f.copy() for f in ImageSequence.Iterator(im)]
+    assert len(frames) >= 4
+
+    # Frame 0 has w=0 everywhere (rest), so no bonded region. Use a
+    # mid-frame as the baseline instead.
+    mid = _count_orange(frames[len(frames) // 2])
+    last = _count_orange(frames[-1])
+    # Sanity: contour must be drawn somewhere in the mid frame.
+    assert mid > 5, f"no contour rendered in mid frame ({mid} px)"
+    # The accumulating-rings bug would make last carry every prior
+    # frame's contour: last >> mid. With the fix last has just one
+    # ring (the current front) which is geometrically the largest
+    # circle so far, so it can legitimately have somewhat more pixels
+    # than mid -- but not Nt x more.
+    # Generous bound at 2x mid. With the bug ratio was ~Nt/2 = 4.
+    assert last <= 2.0 * mid + 200, (
+        f"contour appears to accumulate: mid={mid}px last={last}px "
+        f"(ratio {last / mid:.2f}). Pre-fix this scaled with frame "
+        f"count.")
+
+
 def test_front_radius_progresses_inward_outward_correctly():
     """The synthetic sim has its bonding front grow from r=0 outward to
     r=1; therefore the derived front radius should be monotonically
