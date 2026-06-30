@@ -23,7 +23,8 @@ if str(_root) not in sys.path:
     sys.path.insert(0, str(_root))
 
 from tests.mock_data import make_mock_3d_npz, make_bad_3d_npz   # noqa: E402
-from data.loader import load_dataset, preflight_npz            # noqa: E402
+from data.loader import (load_dataset, preflight_npz,        # noqa: E402
+                          _resolve_workers, _DEFAULT_WORKER_CAP)
 from core.sensors import SensorConfig, place_sensors, sensor_indices  # noqa: E402
 from core.pod_basis import PODBasis                         # noqa: E402
 from core.grid import canonical_grid                        # noqa: E402
@@ -362,6 +363,37 @@ def test_load_dataset_zero_good_raises(tmp_path):
                     **_good_mock_kwargs())
     with pytest.raises(RuntimeError, match="passed preflight"):
         load_dataset(folder, nx=16, ny=16, nt=8, cache=False, workers=1)
+
+
+def test_resolve_workers_caps_on_huge_core_host(monkeypatch):
+    """On a fat node (256 cores) the auto worker count must not blow up.
+
+    Pre-fix the loader resolved workers=None to cpu_count - 2 = 254
+    processes on a 256-core server, each numpy doing all-core BLAS ->
+    server near-OOM. Cap is 32 by default; env override (numeric) wins.
+    """
+    import data.loader as L
+    monkeypatch.setattr(L.os, "cpu_count", lambda: 256)
+    # n_files large, no explicit request -> capped at _DEFAULT_WORKER_CAP.
+    assert _resolve_workers(None, 9999) == _DEFAULT_WORKER_CAP
+    # Env override raises the cap.
+    monkeypatch.setenv("WAFER3D_LOADER_WORKERS_CAP", "64")
+    assert _resolve_workers(None, 9999) == 64
+    # Env override LOWERS the cap (shared box).
+    monkeypatch.setenv("WAFER3D_LOADER_WORKERS_CAP", "4")
+    assert _resolve_workers(None, 9999) == 4
+    # Garbage env value -> falls back to default cap, not a crash.
+    monkeypatch.setenv("WAFER3D_LOADER_WORKERS_CAP", "not_a_number")
+    assert _resolve_workers(None, 9999) == _DEFAULT_WORKER_CAP
+    monkeypatch.delenv("WAFER3D_LOADER_WORKERS_CAP", raising=False)
+    # Explicit request is respected as-is (still capped by n_files only).
+    assert _resolve_workers(200, 9999) == 200
+    assert _resolve_workers(200, 5) == 5
+    # n_files small -> resolved cap is the file count.
+    assert _resolve_workers(None, 3) == 3
+    # Small host -> auto wins over cap.
+    monkeypatch.setattr(L.os, "cpu_count", lambda: 8)
+    assert _resolve_workers(None, 9999) == 6   # 8 - 2
 
 
 def test_cache_records_skip_log(tmp_path):

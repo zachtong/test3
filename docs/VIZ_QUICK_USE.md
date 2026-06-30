@@ -54,7 +54,7 @@ See individual sections below for the manual single-script equivalents
 
 | Step | Command | Notes |
 |---|---|---|
-| Train a model end-to-end | `python scripts/train.py --config configs/default.yaml --data.npz_dir <folder> --data.workers 32 --pod.workers 32 --tag <tag>` | First run ~5-7 h (cache build + POD fit + train). Cache hits after that, ~30-60 min per repeat. |
+| Train a model end-to-end | `python scripts/train.py --config configs/default.yaml --data.npz_dir <folder> --data.workers 32 --pod.workers 32 --tag <tag>` | First run ~5-7 h (cache build + POD fit + train). Cache hits after that, ~30-60 min per repeat. `--data.workers None` is also safe now (auto-capped at 32; see `WAFER3D_LOADER_WORKERS_CAP`). |
 | Try a different K | `... --pod.k 4 --tag <tag>_k4` | basis_cache HIT if `--pod.k <= k_cache (16)`; no refit. |
 | Try bigger model | `... --model.channels 128 --tag <tag>_128ch` | basis_cache HIT, loader HIT. |
 | Drop fewer leading steps | `... --data.drop_first_steps 0 --tag <tag>_nodrop` | Triggers fresh loader cache + basis refit (key changed). |
@@ -109,6 +109,14 @@ to see only what training sees.
 |---|---|---|
 | Cross-sim diversity / variance (std kymograph + top-down) | `python scripts/viz_diversity.py --npz-dir <folder> --out viz/diversity.png` | PNG ~150 KB |
 | Same, but quick preview from 200 sims | `... --limit 200 --out viz/diversity_n200.png` | same; faster |
+| Cap loader workers (fat node / shared box) | `... --workers 16` or `WAFER3D_LOADER_WORKERS_CAP=16 python ...` | safer on shared machines |
+
+Loader worker policy: when `--workers` is not set, the loader picks
+`min(host_cores - 2, 32)` automatically. The 32 ceiling stops a 256-core
+server from spawning ~254 processes (each with full-core BLAS) and
+OOM'ing. Override the ceiling per-call with `--workers N` or globally
+with the env var `WAFER3D_LOADER_WORKERS_CAP=N`. Cache HITS never spawn
+workers regardless of this flag.
 
 ### POD-result viz (needs a basis file)
 

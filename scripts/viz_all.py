@@ -192,6 +192,13 @@ def main() -> int:
     ap.add_argument("--diversity-limit", type=int, default=None,
                     help="cap on sims used for diversity viz; full "
                     "folder by default")
+    ap.add_argument("--workers", type=int, default=None,
+                    help="loader worker count for folder-level viz "
+                    "(diversity). None lets the loader auto-pick "
+                    "min(host_cores - 2, 32); override e.g. on a fat "
+                    "node or a shared box. Per-sim viz already runs "
+                    "workers=1 in-process so this flag does not affect "
+                    "them.")
     ap.add_argument("--topn-worst", type=int, default=5,
                     help="top-N for viz_worst_cases.py")
     ap.add_argument("--value-scale", type=float, default=1.0e6)
@@ -241,6 +248,8 @@ def main() -> int:
                *common_grid]
         if args.diversity_limit:
             cmd += ["--limit", str(args.diversity_limit)]
+        if args.workers is not None:
+            cmd += ["--workers", str(args.workers)]
         if args.tag:
             cmd += ["--tag", args.tag]
         _run(cmd, target, args.force, log)

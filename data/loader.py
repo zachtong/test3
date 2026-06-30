@@ -646,6 +646,36 @@ def _summarize_skips(skip_log: list[dict]) -> None:
         print(f"    ... and {len(skip_log) - cap} more", flush=True)
 
 
+_DEFAULT_WORKER_CAP = 32
+
+
+def _resolve_workers(requested: int | None, n_files: int) -> int:
+    """Pick a safe ProcessPool worker count.
+
+    Policy:
+      - Explicit int request is respected as-is (capped at n_files).
+      - None means auto: min(cpu_count - 2, cap), where cap is 32 by
+        default and can be overridden by the env var
+        WAFER3D_LOADER_WORKERS_CAP (e.g. set to 64 on a fat node, or 8
+        on a shared box). The 32 ceiling exists because canonicalization
+        is I/O- + Delaunay-bound and saturates well before 32 processes;
+        going higher just oversubscribes BLAS threads inside each
+        worker (numpy default = all cores per process) and starves the
+        machine. On a 256-core server that protected default would
+        otherwise resolve to 254 processes * many BLAS threads each.
+    """
+    if requested is not None:
+        return max(1, min(int(requested), max(1, n_files)))
+    try:
+        cap = int(os.environ.get("WAFER3D_LOADER_WORKERS_CAP",
+                                  str(_DEFAULT_WORKER_CAP)))
+    except ValueError:
+        cap = _DEFAULT_WORKER_CAP
+    cap = max(1, cap)
+    auto = max(1, (os.cpu_count() or 2) - 2)
+    return min(auto, cap, max(1, n_files))
+
+
 def _build(files, x_canon, y_canon, t_canon, workers: int | None = None,
            drop_first_steps: int = 0
            ) -> tuple[np.ndarray, list[dict], list[dict]]:
@@ -657,9 +687,7 @@ def _build(files, x_canon, y_canon, t_canon, workers: int | None = None,
       skip_log     list of {basename, skip_reason} for skipped files
     """
     n = len(files)
-    if workers is None:
-        workers = max(1, (os.cpu_count() or 2) - 2)
-    workers = min(workers, n)
+    workers = _resolve_workers(workers, n)
     args = [(str(p), x_canon, y_canon, t_canon, drop_first_steps)
             for p in files]
 
@@ -690,6 +718,11 @@ def _build(files, x_canon, y_canon, t_canon, workers: int | None = None,
             loaded_F.append(f)
             loaded_meta.append(params)
 
+    cores = os.cpu_count() or 0
+    cap_env = os.environ.get("WAFER3D_LOADER_WORKERS_CAP")
+    print(f"  loader: workers={workers}  (host_cores={cores}, "
+          f"cap={cap_env or _DEFAULT_WORKER_CAP}, n_files={n})",
+          flush=True)
     if workers <= 1 or n < _PARALLEL_MIN:
         for k, a in enumerate(args, 1):
             _consume(_build_one_safe(a))
