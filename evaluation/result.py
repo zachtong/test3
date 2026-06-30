@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 import json
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, field, asdict
 from pathlib import Path
 from typing import Any
 
@@ -19,6 +19,14 @@ class ResultSet:
     gap_to_floor: float
     n_params: int
     per_seed_medians: list[float]
+    # Per-test-sim arrays, kept so downstream visualisation (e.g.
+    # scripts/viz_error_vs_floor.py) does not need to re-run the model.
+    # Optional + defaulted to empty so loading an OLD results.json
+    # without these fields still works -- backward compatibility.
+    per_sim_field_errs: list[float] = field(default_factory=list)
+    per_sim_floor_errs: list[float] = field(default_factory=list)
+    per_sim_basenames: list[str] = field(default_factory=list)
+    per_sim_per_mode_errs: dict[str, list[float]] = field(default_factory=dict)
 
     def save_json(self, path: str | Path) -> None:
         Path(path).parent.mkdir(parents=True, exist_ok=True)

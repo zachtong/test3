@@ -11,3 +11,7 @@
 numpy==2.2.6
 PyYAML==6.0.3
 matplotlib==3.10.8
+scipy>=1.10
+# scripts/viz_interactive.py only -- importable on demand. Static PNG /
+# GIF viz scripts do not need it.
+plotly>=5.20

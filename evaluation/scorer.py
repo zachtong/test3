@@ -71,6 +71,11 @@ def evaluate_ensemble(
                          for j in range(len(test_sims))])
         per_seed_medians.append(float(np.median(errs)))
 
+    per_sim_per_mode = {}
+    for k in range(K):
+        per_sim_per_mode[f"a_{k+1}"] = per_mode_rel_l2(
+            a_pred[:, k, :], a_true[:, k, :]).tolist()
+
     return ResultSet(
         config=config_to_dict(cfg),
         global_stats=stats(field_errs),
@@ -81,4 +86,9 @@ def evaluate_ensemble(
                      / max(float(np.median(floor_errs)), 1e-12),
         n_params=sum(p.numel() for p in models[0].parameters()),
         per_seed_medians=per_seed_medians,
+        per_sim_field_errs=field_errs.tolist(),
+        per_sim_floor_errs=floor_errs.tolist(),
+        per_sim_basenames=[s.params.get("basename", "")
+                           for s in test_sims],
+        per_sim_per_mode_errs=per_sim_per_mode,
     )
