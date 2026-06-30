@@ -656,7 +656,12 @@ def _build(files, x_canon, y_canon, t_canon, workers: int | None = None,
               flush=True)
         with ProcessPoolExecutor(max_workers=workers) as ex:
             for k, res in enumerate(
-                    ex.map(_build_one_safe, args, chunksize=4), 1):
+                    # chunksize=1: first sim returns within ~80 s instead
+                    # of ~5 min (chunksize=4 forced the first worker to
+                    # finish a 4-sim batch before any progress tick
+                    # appeared). IPC overhead per sim is < 1 ms vs the
+                    # 80 s of actual work, so total time is unaffected.
+                    ex.map(_build_one_safe, args, chunksize=1), 1):
                 _consume(res)
                 _tick(k)
     print(f"  loader: built {len(loaded_F)} sim(s) out of {n} file(s) "
