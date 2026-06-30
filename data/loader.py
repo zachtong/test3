@@ -53,7 +53,7 @@ from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
 import numpy as np
-from scipy.spatial import Delaunay
+from scipy.spatial import Delaunay, cKDTree
 
 from core.simulation import Simulation
 from core.grid import canonical_grid, disk_mask
@@ -338,51 +338,86 @@ def _interp_rows(x_new: np.ndarray, x_old: np.ndarray,
 
 
 def _precompute_bary(xy_native: np.ndarray,
-                     grid_pts: np.ndarray
-                     ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Delaunay-based barycentric weights for many "function" interpolations.
+                     grid_pts: np.ndarray,
+                     in_disk_flat: np.ndarray | None = None,
+                     ) -> tuple[np.ndarray, np.ndarray, np.ndarray,
+                                np.ndarray, np.ndarray]:
+    """Delaunay-based barycentric weights + nearest-neighbour edge fill.
 
     Builds one Delaunay over `xy_native`, locates each query point in the
-    grid in a simplex, then returns (vertices, weights, inside) so a caller
-    can interpolate any value vector v defined on the native points at all
-    query points via `(v[vertices] * weights).sum(axis=1)` -- without
-    re-running find_simplex on every value vector.
+    grid in a simplex, and ALSO computes a nearest-native-point fallback
+    for query points that are in-disk-but-off-hull. This is the loader's
+    response to the y-axis kymograph artifact: native point clouds rarely
+    sample the wafer edge exactly along x = 0 or y = 0, so the Delaunay
+    hull leaves a thin strip of in-disk canonical cells unfilled. Without
+    this fallback the loader zeroes them and downstream POD / kymograph /
+    overlay all show false zeros along the axes near the bonding front.
 
     Returns:
-        vertices: (Nq, 3) int   indices into the native points
-        weights:  (Nq, 3) float barycentric coordinates summing to 1 inside
-        inside:   (Nq,)   bool  False where the query is outside the hull
+        vertices: (Nq, 3) int   indices into the native points (bary tri)
+        weights:  (Nq, 3) float barycentric coordinates inside the hull
+        inside:   (Nq,)   bool  True if the query is inside the hull
+        fill_target: (Nq,) bool True where caller should use the nearest-
+                                neighbour fill (in-disk AND off-hull)
+        fill_src: (Nq,) int     nearest-native point index for each
+                                query (only fill_target rows are used)
+
+    in_disk_flat: optional (Nq,) bool -- True where the canonical grid
+        cell is inside the wafer disk. If None, every off-hull cell is
+        considered a fill target (no disk masking).
     """
     tri = Delaunay(xy_native)
     simplex = tri.find_simplex(grid_pts)
     inside = simplex >= 0
-    # For off-hull points, find_simplex returns -1; index 0 is a safe stand-in
-    # so the gather below does not raise; the inside mask zeroes them later.
+    # For off-hull points, find_simplex returns -1; index 0 is a safe
+    # stand-in so the gather below does not raise; the inside mask
+    # zeroes them later (before the fill overwrites them).
     simplex_safe = np.where(inside, simplex, 0)
 
     # scipy stores per-simplex affine maps in tri.transform with shape
-    # (n_simplex, ndim+1, ndim). The first ndim rows of each (ndim+1, ndim)
-    # block, multiplied by (q - last_vertex), yield (ndim) barycentric
-    # coordinates b1..b_ndim; b_{ndim+1} = 1 - sum(b1..b_ndim).
-    T = tri.transform[simplex_safe]              # (Nq, 3, 2)
-    delta = grid_pts - T[:, 2, :]                # (Nq, 2)
-    b_first = np.einsum("ijk,ik->ij", T[:, :2, :], delta)  # (Nq, 2)
+    # (n_simplex, ndim+1, ndim). The first ndim rows of each
+    # (ndim+1, ndim) block, multiplied by (q - last_vertex), yield
+    # (ndim) barycentric coordinates b1..b_ndim;
+    # b_{ndim+1} = 1 - sum(b1..b_ndim).
+    T = tri.transform[simplex_safe]                              # (Nq, 3, 2)
+    delta = grid_pts - T[:, 2, :]                                # (Nq, 2)
+    b_first = np.einsum("ijk,ik->ij", T[:, :2, :], delta)        # (Nq, 2)
     b_last = 1.0 - b_first.sum(axis=1, keepdims=True)
-    weights = np.concatenate([b_first, b_last], axis=1)    # (Nq, 3)
-    vertices = tri.simplices[simplex_safe]                 # (Nq, 3)
-    return vertices, weights, inside
+    weights = np.concatenate([b_first, b_last], axis=1)          # (Nq, 3)
+    vertices = tri.simplices[simplex_safe]                       # (Nq, 3)
+
+    # Nearest-neighbour fallback for in-disk-but-off-hull cells.
+    if in_disk_flat is None:
+        fill_target = ~inside
+    else:
+        fill_target = (~inside) & in_disk_flat
+    fill_src = np.zeros(grid_pts.shape[0], dtype=np.int64)
+    if fill_target.any():
+        kd = cKDTree(xy_native)
+        _, nn = kd.query(grid_pts[fill_target], k=1)
+        fill_src[fill_target] = nn
+    return vertices, weights, inside, fill_target, fill_src
 
 
 def _interp_to_grid(values: np.ndarray, vertices: np.ndarray,
                     weights: np.ndarray, inside: np.ndarray,
+                    fill_target: np.ndarray, fill_src: np.ndarray,
                     nx: int, ny: int) -> np.ndarray:
-    """Apply precomputed barycentric weights to a scalar field.
+    """Apply precomputed barycentric weights + nearest-neighbour fill.
 
-    values: (N_native,) float -- displacement at every native point.
-    returns: (nx, ny) float32 -- value 0 off-hull (and where mask later kills).
+    Per cell:
+      - inside the convex hull -> linear interp via bary weights
+      - off-hull AND in fill_target (i.e. inside the wafer disk) ->
+        nearest native point's value
+      - off-hull AND not in fill_target -> 0
+
+    values: (N_native,) float per-native displacement at this timestep.
+    returns: (nx, ny) float32.
     """
     q = (values[vertices] * weights).sum(axis=1)
     q[~inside] = 0.0
+    if fill_target.any():
+        q[fill_target] = values[fill_src[fill_target]]
     return q.astype(np.float32).reshape(nx, ny)
 
 
@@ -483,6 +518,11 @@ def _build_one(args):
         if "num_wafer_steps" in z.files:
             params["num_wafer_steps"] = int(z["num_wafer_steps"])
 
+        # --- disk mask computed once, used both for nearest-fill
+        # decision (in_disk_flat) and for the final off-disk zeroing. ---
+        mask2d = disk_mask(nx, ny, x_canon[-1], y_canon[-1])
+        in_disk_flat = mask2d.ravel()
+
         # --- spatial: per-step Delaunay, shared across all samples in step ---
         # Pre-allocate at the FILTERED count S, not raw S_raw.
         f_stack = np.zeros((S, nx, ny), dtype=np.float32)
@@ -507,7 +547,8 @@ def _build_one(args):
             # tolerance is per-coord so we re-snap here.
             xy_native = np.maximum(xy_native, 0.0)
 
-            vertices, weights, inside = _precompute_bary(xy_native, grid_pts)
+            vertices, weights, inside, fill_tgt, fill_src = _precompute_bary(
+                xy_native, grid_pts, in_disk_flat=in_disk_flat)
 
             disp_all = np.asarray(
                 z[f"{prefix}_displacement_z_corrected_upper"]
@@ -515,10 +556,12 @@ def _build_one(args):
             for k in sample_ks:
                 values = disp_all[int(time_idx_arr[k]), :].astype(np.float64)
                 f_stack[k] = _interp_to_grid(values, vertices, weights,
-                                             inside, nx, ny)
+                                             inside, fill_tgt, fill_src,
+                                             nx, ny)
 
     # --- mask off-disk cells (corners of the bounding square) ---
-    mask2d = disk_mask(nx, ny, x_canon[-1], y_canon[-1])
+    # Defensive: nearest-neighbour fill only targets in-disk cells, so
+    # this is mostly a no-op, but keeps the invariant explicit.
     f_stack[:, ~mask2d] = 0.0
 
     # --- temporal: dedupe step boundaries + resample to Nt ---

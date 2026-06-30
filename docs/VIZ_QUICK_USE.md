@@ -93,7 +93,9 @@ your data folder.
 
 | Goal | Command | Output |
 |---|---|---|
-| Top-down 2-panel animation (raw vs canonical, sensors + bonded contour) | `python scripts/viz_topdown_gif.py --sim <sim> --out viz/topdown.gif` | GIF ~500 KB |
+| Top-down animation (canonical full disk, sensors + bonded contour) | `python scripts/viz_topdown_gif.py --sim <sim> --out viz/topdown.gif` | GIF ~500 KB |
+| Same but lock the colour scale across frames | `... --norm-mode per-sim` | (default is per-frame so the curved bonded shape is visible at every t) |
+| Add a raw-NPZ debug panel on the left (step_0000) | `... --include-raw` | (off by default; step_0000 is the pre-contact equilibration step, mostly near-zero) |
 | 3D-kymograph trio (3 radial slices at theta=0/45/90) -- TALK HERO | `python scripts/viz_radial_kymograph.py --sim <sim> --out viz/kymo.png` | PNG ~100 KB |
 | Interactive 3D surface (browser, rotate / zoom / hover / time-slider) | `python scripts/viz_interactive.py --sim <sim> --out viz/sim.html` | HTML ~10-25 MB |
 
@@ -166,7 +168,10 @@ Heavyweight: loads dataset, rebuilds split, fits or loads basis, loads
   - Unsigned (errors, std, mode-error scatter colour): viridis.
 - Sensor markers: magenta (`SENSOR_PALETTE[4] = #DA1884`), never
   appears in WAFER_CMAP so stays visible at every value.
-- Bonding-front overlay: TEL magenta line / contour.
+- Bonding-front overlay: TEL **orange** (`SENSOR_PALETTE[6] = #E16A13`).
+  Was magenta originally; switched to orange because magenta sits too
+  close to WAFER_CMAP's deep-purple end and visually confused the
+  bonded region with the front itself.
 - vmin/vmax policy:
   - Single-sim viz: per-sim global (stable across animation frames).
   - Multi-panel single-sim viz (e.g. radial kymograph trio): same

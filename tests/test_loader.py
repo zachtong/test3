@@ -165,6 +165,67 @@ def test_preflight_accepts_clean(tmp_path):
     assert ok is True, f"good fixture rejected: {reason}"
 
 
+def test_nearest_fill_recovers_axis_strip(tmp_path):
+    """Native points missing the x=0 strip should NOT leave a column
+    of zeros in the loaded canonical field.
+
+    Builds a mock NPZ then surgically removes every native point with
+    x < x_threshold (mimicking the real-data condition where COMSOL
+    rarely samples exactly on the y-axis), reloads via the loader, and
+    asserts that column ix=0 of the loaded field is mostly non-zero
+    inside the disk -- which only the nearest-neighbour fill in
+    _precompute_bary can deliver. Without the fix this column would
+    be all zeros."""
+    folder = tmp_path / "axis_gap"
+    folder.mkdir()
+    p = folder / "data.npz"
+    make_mock_3d_npz(p, n_steps=2, t_per_step=(5, 4),
+                     n_upper_per_step=(200, 240),
+                     n_lower_per_step=(180, 220), seed=0)
+
+    # Remove all native points with x < 0.015 m (= 10% of R) from
+    # step 0's upper coords AND displacement, simulating a gap on
+    # the y-axis side of the canonical hull.
+    R = 0.15
+    X_GAP_M = 0.015
+    with np.load(p, allow_pickle=True) as z:
+        payload = {k: z[k] for k in z.files}
+    coords = payload["step_0000_coordinates_upper"]               # (3, N)
+    disp = payload["step_0000_displacement_z_corrected_upper"]    # (T, N)
+    thk = payload["step_0000_thickness_upper"]                    # (T, N)
+    keep_mask = coords[0] >= X_GAP_M
+    n_before, n_after = coords.shape[1], int(keep_mask.sum())
+    assert n_after < n_before, "test setup: expected some points to be cut"
+    payload["step_0000_coordinates_upper"] = coords[:, keep_mask]
+    payload["step_0000_displacement_z_corrected_upper"] = disp[:, keep_mask]
+    payload["step_0000_thickness_upper"] = thk[:, keep_mask]
+    payload["step_0000_num_upper_points"] = np.int64(n_after)
+    # also adjust the per-sample convenience array for the samples
+    # belonging to step 0
+    s_step = payload["sample_step_index"]
+    s_nu = payload["sample_num_upper_points"]
+    s_nu_arr = np.asarray(s_nu).copy()
+    s_nu_arr[s_step == 0] = n_after
+    payload["sample_num_upper_points"] = s_nu_arr
+    np.savez(p, **payload)
+
+    _, _, sims = load_dataset(folder, nx=32, ny=32, nt=8,
+                              cache=False, workers=1,
+                              drop_first_steps=0)
+    assert len(sims) == 1
+    f = sims[0].f                                    # (32, 32, 8)
+    # Column ix=0 of canonical at the last time index, inside the disk.
+    # The disk at column 0 spans y in [0, x_canon[0]^2 + y^2 <= 1] =>
+    # all rows are in disk (x=0 -> any y in [0, 1] satisfies y^2 <= 1).
+    col0_last = f[0, :, -1]
+    # Pre-fix this would be all-zero. With nearest-fill it must have
+    # at least a few non-zero cells.
+    nnz = int((np.abs(col0_last) > 1e-12).sum())
+    assert nnz >= f.shape[1] // 4, (
+        f"x=0 column at t=-1 has only {nnz}/{f.shape[1]} non-zero "
+        f"cells; nearest-neighbour fill not working")
+
+
 def test_field_covers_full_quarter_disk(tmp_path):
     """Regression: native coord -> canonical grid normalisation must cover
     the WHOLE quarter-disk, not just the (0..R) corner.

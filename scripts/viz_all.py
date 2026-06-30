@@ -246,6 +246,13 @@ def main() -> int:
         _run(cmd, target, args.force, log)
 
     # === per-sim picks ===
+    # In-process loop: load each picked sim ONCE via load_dataset
+    # (single-file tempdir, cache=False), then call the render
+    # functions of viz_topdown_gif and viz_radial_kymograph directly.
+    # Saves ~80 s per sim per extra viz vs spawning subprocesses each
+    # of which would re-do the Delaunay + interpolation. Interactive
+    # HTML stays as a subprocess because plotly is an optional dep
+    # we lazy-import only when needed.
     sims_picked = []
     if any(v in enabled for v in ("topdown", "kymo", "interactive")):
         sims_picked = _pick_sims(folder, args.n_samples, args.select,
@@ -253,32 +260,95 @@ def main() -> int:
         if not sims_picked:
             print("WARN: 0 preflight-passing NPZ for per-sim viz",
                   file=sys.stderr)
+        # In-process imports -- only needed if we are doing topdown/kymo.
+        if {"topdown", "kymo"} & enabled:
+            from data.loader import load_dataset
+            from core.sensors import SensorConfig, place_sensors
+            from scripts.viz_topdown_gif import render_topdown_gif
+            from scripts.viz_radial_kymograph import render_radial_kymograph
+            import shutil as _shutil
+            import tempfile as _tempfile
+            # Sensor positions (lab rig default)
+            positions = ((1.0, 0.0), (1.0, 45.0), (1.0, 90.0))
+            scfg = SensorConfig(n=3, strategy="custom",
+                                positions=positions)
+            sensor_xy = place_sensors(scfg)
         for sim_path in sims_picked:
             sim_stem = sim_path.stem
             sim_dir = out_root / "per_sim" / sim_stem
             sim_dir.mkdir(parents=True, exist_ok=True)
-            tag_args = (["--tag", args.tag] if args.tag else [])
-            if "topdown" in enabled:
-                target = sim_dir / "topdown.gif"
-                cmd = [py, str(_root / "scripts" / "viz_topdown_gif.py"),
-                       "--sim", str(sim_path),
-                       "--out", str(target),
-                       *common_grid, *tag_args]
-                _run(cmd, target, args.force, log)
-            if "kymo" in enabled:
-                target = sim_dir / "kymo.png"
-                cmd = [py, str(_root / "scripts" / "viz_radial_kymograph.py"),
-                       "--sim", str(sim_path),
-                       "--out", str(target),
-                       *common_grid, *tag_args,
-                       "--value-scale", str(args.value_scale)]
-                _run(cmd, target, args.force, log)
+
+            # Figure out which of {topdown, kymo} need rendering for
+            # THIS sim (skip-existing applies per-target).
+            tgt_topdown = sim_dir / "topdown.gif"
+            tgt_kymo = sim_dir / "kymo.png"
+            need_topdown = ("topdown" in enabled
+                            and (args.force or not tgt_topdown.exists()))
+            need_kymo = ("kymo" in enabled
+                         and (args.force or not tgt_kymo.exists()))
+
+            # Skip-existing accounting (logged even when no work done)
+            if "topdown" in enabled and not need_topdown:
+                log.append((tgt_topdown, "skipped", 0.0,
+                            "target exists, --force to overwrite"))
+            if "kymo" in enabled and not need_kymo:
+                log.append((tgt_kymo, "skipped", 0.0,
+                            "target exists, --force to overwrite"))
+
+            # Load the sim only if at least one in-process viz is wanted.
+            if need_topdown or need_kymo:
+                print(f"\n[in-process] loading {sim_path.name} ...",
+                      flush=True)
+                t_load = time.time()
+                with _tempfile.TemporaryDirectory() as td:
+                    staged = Path(td) / sim_path.name
+                    _shutil.copy(sim_path, staged)
+                    x_canon, y_canon, sims_loaded = load_dataset(
+                        Path(td), nx=args.nx, ny=args.ny, nt=args.nt,
+                        cache=False, workers=1,
+                        drop_first_steps=args.drop_first_steps)
+                if not sims_loaded:
+                    log.append((sim_dir, "FAIL", time.time() - t_load,
+                                f"loader rejected {sim_path.name}"))
+                    continue
+                sim = sims_loaded[0]
+                print(f"[in-process] loaded {sim.f.shape} in "
+                      f"{time.time() - t_load:.1f}s", flush=True)
+
+                if need_topdown:
+                    t0 = time.time()
+                    try:
+                        render_topdown_gif(
+                            sim, x_canon, y_canon, sensor_xy, tgt_topdown,
+                            sim_id=sim_stem, tag=args.tag,
+                            drop_first_steps=args.drop_first_steps)
+                        log.append((tgt_topdown, "ok",
+                                    time.time() - t0, "in-process"))
+                    except Exception as e:                  # noqa: BLE001
+                        log.append((tgt_topdown, "FAIL",
+                                    time.time() - t0, f"{type(e).__name__}: {e}"))
+                if need_kymo:
+                    t0 = time.time()
+                    try:
+                        render_radial_kymograph(
+                            sim, x_canon, y_canon, tgt_kymo,
+                            value_scale=args.value_scale,
+                            sim_id=sim_stem, tag=args.tag,
+                            drop_first_steps=args.drop_first_steps)
+                        log.append((tgt_kymo, "ok",
+                                    time.time() - t0, "in-process"))
+                    except Exception as e:                  # noqa: BLE001
+                        log.append((tgt_kymo, "FAIL",
+                                    time.time() - t0, f"{type(e).__name__}: {e}"))
+
+            # Interactive HTML stays a subprocess (plotly is optional)
             if "interactive" in enabled:
                 target = sim_dir / "interactive.html"
                 cmd = [py, str(_root / "scripts" / "viz_interactive.py"),
                        "--sim", str(sim_path),
                        "--out", str(target),
-                       *common_grid, *tag_args,
+                       *common_grid,
+                       *(["--tag", args.tag] if args.tag else []),
                        "--value-scale", str(args.value_scale)]
                 _run(cmd, target, args.force, log)
 

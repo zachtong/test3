@@ -37,11 +37,18 @@ if str(_root) not in sys.path:
     sys.path.insert(0, str(_root))
 
 from data.loader import load_dataset                         # noqa: E402
+from core.simulation import Simulation                        # noqa: E402
 from scripts.fieldviz import (wafer_value_range,             # noqa: E402
                                provenance_footer,
                                compute_bonded_mask,
                                front_radius_per_t,
-                               WAFER_CMAP, SENSOR_MARKER_COLOR)
+                               WAFER_CMAP, SENSOR_PALETTE)
+
+
+# Bonded-front line colour. Orange (SENSOR_PALETTE[6] = #E16A13) is
+# distinct from every value in WAFER_CMAP so the front stays visible
+# from yellow (near-zero) all the way to purple (deepest descent).
+_FRONT_COLOR = SENSOR_PALETTE[6]
 
 
 def _sample_radial_kymograph(f: np.ndarray, x_canon: np.ndarray,
@@ -78,6 +85,91 @@ def _sample_radial_kymograph(f: np.ndarray, x_canon: np.ndarray,
     w01 = (1 - dx)[:, None] * dy[:, None]
     w11 = dx[:, None] * dy[:, None]
     return w00 * a00 + w10 * a10 + w01 * a01 + w11 * a11
+
+
+def render_radial_kymograph(sim: Simulation, x_canon: np.ndarray,
+                            y_canon: np.ndarray,
+                            out_path: Path | str, *,
+                            angles: list[float] | None = None,
+                            gap_threshold_um: float = 1.0,
+                            value_scale: float = 1.0e6,
+                            sensor_rs: list[float] | None = None,
+                            sensor_thetas: list[float] | None = None,
+                            sim_id: str | None = None,
+                            tag: str | None = None,
+                            drop_first_steps: int | None = None) -> Path:
+    """Render the radial-kymograph trio in-process.
+
+    Pure rendering -- caller supplies the loaded sim. Used by
+    scripts/viz_all.py to share one loader pass across multiple viz
+    of the same sim.
+    """
+    if angles is None:
+        angles = [0.0, 45.0, 90.0]
+    if sensor_rs is None:
+        sensor_rs = [1.0, 1.0, 1.0]
+    if sensor_thetas is None:
+        sensor_thetas = [0.0, 45.0, 90.0]
+    nx, ny, nt = sim.f.shape
+    n_r = nx
+
+    kymos = [_sample_radial_kymograph(
+        sim.f.astype(np.float64), x_canon, y_canon, th, n_r=n_r)
+        for th in angles]
+    scaled = [k * value_scale for k in kymos]
+    all_scaled = np.concatenate([k.ravel() for k in scaled])
+    vmin, vmax = wafer_value_range(all_scaled)
+
+    bonded = compute_bonded_mask(sim.f.astype(np.float64),
+                                  gap_threshold_um=gap_threshold_um)
+    front_r = front_radius_per_t(bonded, x_canon, y_canon)
+
+    sensor_by_th: dict = {}
+    for r, t in zip(sensor_rs, sensor_thetas):
+        sensor_by_th.setdefault(round(float(t), 3), []).append(float(r))
+
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    fig, axes = plt.subplots(len(angles), 1,
+                             figsize=(11, 2.7 * len(angles)),
+                             sharex=True, constrained_layout=True)
+    if len(angles) == 1:
+        axes = [axes]
+    t_axis = np.linspace(0.0, 1.0, nt)
+    r_axis = np.linspace(0.0, 1.0, n_r)
+    im = None
+    for ax, th, ky in zip(axes, angles, scaled):
+        im = ax.imshow(ky, origin="lower", aspect="auto",
+                       extent=[t_axis[0], t_axis[-1],
+                               r_axis[0], r_axis[-1]],
+                       vmin=vmin, vmax=vmax, cmap=WAFER_CMAP,
+                       interpolation="nearest")
+        ax.set_ylabel("r (normalised)")
+        ax.set_title(f"theta = {th:g} deg", fontsize=10)
+        ax.plot(t_axis, front_r, color=_FRONT_COLOR, lw=1.4,
+                label="bonded front (3D mean)")
+        for r in sensor_by_th.get(round(float(th), 3), []):
+            ax.axhline(r, color="black", lw=0.7, ls="--", alpha=0.6)
+            ax.text(t_axis[-1], r, f" sensor r={r:.2g}",
+                    va="center", fontsize=7, color="black")
+        if ax is axes[0]:
+            ax.legend(loc="lower left", fontsize=8)
+    axes[-1].set_xlabel("normalised time")
+    fig.colorbar(im, ax=axes, shrink=0.85, location="right",
+                 label=f"u_z * {value_scale:g}")
+    fig.suptitle(f"{sim_id or 'sim'}  |  radial-slice kymograph trio  |  "
+                 f"per-sim shared colour scale", fontsize=11)
+    provenance_footer(fig, sim_id=sim_id, tag=tag,
+                      extras={"drop": drop_first_steps,
+                              "gap_um": gap_threshold_um,
+                              "angles": ",".join(str(a) for a in angles)})
+    Path(out_path).parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(str(out_path), dpi=130, bbox_inches="tight")
+    plt.close(fig)
+    print(f"wrote {out_path}", flush=True)
+    return Path(out_path)
 
 
 def main() -> int:
@@ -125,84 +217,17 @@ def main() -> int:
         print("loader rejected this sim via preflight", file=sys.stderr)
         return 1
     sim = sims[0]
-    nx, ny, nt = sim.f.shape
     print(f"  loaded {sim.f.shape}", flush=True)
 
-    # Sample one kymograph per angle
-    kymos = []
-    n_r = nx
-    for th in angles:
-        ky = _sample_radial_kymograph(
-            sim.f.astype(np.float64), x_canon, y_canon, th, n_r=n_r)
-        kymos.append(ky)
-
-    # Shared per-sim colour range across all kymos. WAFER_CMAP is
-    # sequential (purple = deepest descent, yellow = rest); range is
-    # naturally asymmetric for wafer-bonding displacement.
-    scaled = [k * args.value_scale for k in kymos]
-    all_scaled = np.concatenate([k.ravel() for k in scaled])
-    vmin, vmax = wafer_value_range(all_scaled)
-
-    # Bonded front (full 3D), then radius per t for overlay.
-    bonded = compute_bonded_mask(
-        sim.f.astype(np.float64),
-        gap_threshold_um=args.gap_threshold_um)
-    front_r = front_radius_per_t(bonded, x_canon, y_canon)
-
-    # Sensor markers: bucket by theta.
-    sensor_rs = [float(r) for r in args.sensor_radii.split(",")]
-    sensor_ths = [float(t) for t in args.sensor_thetas.split(",")]
-    sensor_by_th: dict = {}
-    for r, t in zip(sensor_rs, sensor_ths):
-        sensor_by_th.setdefault(round(t, 3), []).append(r)
-
-    # --- figure ---
-    import matplotlib
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-
-    fig, axes = plt.subplots(len(angles), 1, figsize=(11, 2.7 * len(angles)),
-                             sharex=True, constrained_layout=True)
-    if len(angles) == 1:
-        axes = [axes]
-    t_axis = np.linspace(0.0, 1.0, nt)
-    r_axis = np.linspace(0.0, 1.0, n_r)
-    for ax, th, ky in zip(axes, angles, scaled):
-        im = ax.imshow(ky, origin="lower", aspect="auto",
-                       extent=[t_axis[0], t_axis[-1],
-                               r_axis[0], r_axis[-1]],
-                       vmin=vmin, vmax=vmax, cmap=WAFER_CMAP,
-                       interpolation="nearest")
-        ax.set_ylabel("r (normalised)")
-        ax.set_title(f"theta = {th:g} deg", fontsize=10)
-        # Bonding front overlay (the SAME scalar front for every panel
-        # -- a property of the global 3D mask, by construction it is
-        # azimuthally averaged. Different angles may see the front at
-        # slightly different radii in principle, but the scalar overlay
-        # is the consistent project-wide measure.)
-        ax.plot(t_axis, front_r, color=SENSOR_MARKER_COLOR, lw=1.4,
-                label="bonded front (3D mean)")
-        # Sensor radius markers for this theta.
-        for r in sensor_by_th.get(round(th, 3), []):
-            ax.axhline(r, color="black", lw=0.7, ls="--", alpha=0.6)
-            ax.text(t_axis[-1], r, f" sensor r={r:.2g}",
-                    va="center", fontsize=7, color="black")
-        if ax is axes[0]:
-            ax.legend(loc="lower left", fontsize=8)
-    axes[-1].set_xlabel("normalised time")
-    fig.colorbar(im, ax=axes, shrink=0.85, location="right",
-                 label=f"u_z * {args.value_scale:g}")
-    fig.suptitle(f"{sim_path.stem}  |  radial-slice kymograph trio  |  "
-                 f"K=8 displacement (per-sim shared colour scale)",
-                 fontsize=11)
-    provenance_footer(fig, sim_id=sim_path.name, tag=args.tag,
-                      extras={"drop": args.drop_first_steps,
-                              "gap_um": args.gap_threshold_um,
-                              "angles": args.angles})
-    Path(args.out).parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(args.out, dpi=130, bbox_inches="tight")
-    plt.close(fig)
-    print(f"wrote {args.out}", flush=True)
+    render_radial_kymograph(
+        sim, x_canon, y_canon, args.out,
+        angles=angles,
+        gap_threshold_um=args.gap_threshold_um,
+        value_scale=args.value_scale,
+        sensor_rs=[float(r) for r in args.sensor_radii.split(",")],
+        sensor_thetas=[float(t) for t in args.sensor_thetas.split(",")],
+        sim_id=sim_path.stem, tag=args.tag,
+        drop_first_steps=args.drop_first_steps)
     return 0
 
 
