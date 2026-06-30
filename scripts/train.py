@@ -111,7 +111,8 @@ def main() -> None:
         seed=cfg.data.seed, train_frac=cfg.data.train_frac,
         val_frac=cfg.train.val_frac,
         cache_dir=cfg.basis_cache_dir, k_cache=cfg.pod.k_cache,
-        force_refit=cfg.pod.force_refit)
+        force_refit=cfg.pod.force_refit,
+        workers=cfg.pod.workers)
     print(f"POD K={cfg.pod.k}  sigma ratio="
           f"{(basis.sigma / basis.sigma[0]).round(4).tolist()}")
 

@@ -52,7 +52,8 @@ def load_or_fit_basis(sims, K: int, *, npz_dir, nx, ny, nt,
                       x_end, y_end, drop_first_steps,
                       seed, train_frac, val_frac,
                       cache_dir, k_cache: int = 16,
-                      force_refit: bool = False) -> PODBasis:
+                      force_refit: bool = False,
+                      workers: int | None = None) -> PODBasis:
     """Return a K-mode PODBasis, loading from / saving to a shared cache.
 
     Args:
@@ -102,9 +103,9 @@ def load_or_fit_basis(sims, K: int, *, npz_dir, nx, ny, nt,
                   flush=True)
 
     print(f"  POD basis cache MISS: fitting K={k_cache} on "
-          f"{n_fit} sims ...", flush=True)
+          f"{n_fit} sims (workers={workers}) ...", flush=True)
     t0 = time.time()
-    full = PODBasis.fit(sims, K=k_cache)
+    full = PODBasis.fit(sims, K=k_cache, workers=workers)
     print(f"  POD basis fit in {(time.time() - t0) / 60.0:.1f} min",
           flush=True)
     # Atomic write so a kill during save doesn't leave a corrupt file

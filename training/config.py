@@ -36,6 +36,12 @@ class PODConfig:
     # the underlying NPZ data was edited in place and you know the
     # cache key would not change but the contents would.
     force_refit: bool = False
+    # Workers for the per-sim Gram accumulation. None / 1 = serial
+    # streaming. On a many-core server set to ~32 to parallelise the
+    # partial Gram reduce -- each worker carries one extra 2 GB Gram
+    # at firehorse2 scale, so 32 workers cost ~64 GB peak (fine on a
+    # 1 TB workstation, but check before going much higher).
+    workers: int | None = None
 
 
 @dataclass(frozen=True)
