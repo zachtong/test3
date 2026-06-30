@@ -14,6 +14,42 @@ Conventions:
 
 ---
 
+## TL;DR -- run everything with one command
+
+```bash
+# Data-only (no training run yet): diversity + first 3 sims' single-sim viz
+python scripts/viz_all.py --npz-dir <folder> --out viz/<short_name>
+
+# Full suite (training run done): + POD viz + ML diagnostic + worst cases
+python scripts/viz_all.py --npz-dir <folder> --tag <tag> \\
+    --out viz/<tag>
+
+# Pick the worst-error sims for the per-sim viz (needs --tag's results.json)
+python scripts/viz_all.py --npz-dir <folder> --tag <tag> \\
+    --select byerr --n-samples 5 --out viz/<tag>_worst5
+
+# Skip the heavy interactive HTML, only generate static figures
+python scripts/viz_all.py --npz-dir <folder> --tag <tag> \\
+    --exclude interactive --out viz/<tag>
+```
+
+Re-runs are cheap (existing outputs skipped); pass `--force` to overwrite.
+Outputs land under:
+
+```
+viz/<your_name>/
+  diversity.png
+  per_sim/<sim_basename>/{topdown.gif, kymo.png, interactive.html}
+  pod/{spectrum.png, mode_atlas.png}              # if --tag
+  ml/{err_vs_floor.png, err_vs_floor_a6.png, ak_scatter.png}  # if --tag
+  worst/0001_*.png ...                            # if --tag
+```
+
+See individual sections below for the manual single-script equivalents
+(viz_all.py just shells out to them; copy any printed command to debug).
+
+---
+
 ## Training
 
 | Step | Command | Notes |
