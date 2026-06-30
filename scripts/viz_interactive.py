@@ -38,7 +38,9 @@ if str(_root) not in sys.path:
 from data.loader import load_dataset                         # noqa: E402
 from core.sensors import SensorConfig, place_sensors         # noqa: E402
 from scripts.fieldviz import (mirror_d2, compute_bonded_mask,  # noqa: E402
-                               front_radius_per_t)
+                               front_radius_per_t,
+                               wafer_value_range,
+                               wafer_cmap_to_plotly)
 
 
 def main() -> int:
@@ -133,21 +135,18 @@ def main() -> int:
         full = full.astype(np.float64)
         full[~in_disk] = np.nan
         z_frames.append(full)
-    # Symmetric colour scale across all frames
+    # Asymmetric colour range matching the WAFER_CMAP sequential
+    # palette (purple=most negative, yellow=zero/rest).
     finite = np.concatenate([zf[np.isfinite(zf)].ravel() for zf in z_frames])
-    if finite.size > 0:
-        v = float(max(abs(np.percentile(finite, 1)),
-                      abs(np.percentile(finite, 99))))
-        if v == 0:
-            v = 1.0
-    else:
-        v = 1.0
-    print(f"  colour range +/- {v:.3g} (1-99 pct)", flush=True)
+    vmin, vmax = wafer_value_range(finite)
+    print(f"  colour range [{vmin:.3g}, {vmax:.3g}] (1-99 pct, "
+          f"clipped to <= 0 at top)", flush=True)
+    wafer_scale = wafer_cmap_to_plotly()
 
     # Initial trace = first frame
     surface = go.Surface(
         x=X_full, y=Y_full, z=z_frames[0],
-        cmin=-v, cmax=v, colorscale="RdBu_r",
+        cmin=vmin, cmax=vmax, colorscale=wafer_scale,
         colorbar=dict(title=f"u_z * {args.value_scale:g}", thickness=15),
         name="upper wafer displacement",
         hovertemplate=("x=%{x:.3f}<br>y=%{y:.3f}<br>"
@@ -180,7 +179,7 @@ def main() -> int:
         frames.append(go.Frame(
             data=[
                 go.Surface(z=z_frames[i], x=X_full, y=Y_full,
-                           cmin=-v, cmax=v, colorscale="RdBu_r",
+                           cmin=vmin, cmax=vmax, colorscale=wafer_scale,
                            showscale=False),
                 go.Scatter3d(x=sensor_xy[:, 0], y=sensor_xy[:, 1], z=sz,
                              mode="markers+text",
@@ -208,7 +207,7 @@ def main() -> int:
             aspectratio=dict(x=1, y=1, z=0.4),
             xaxis=dict(range=[-1.05, 1.05]),
             yaxis=dict(range=[-1.05, 1.05]),
-            zaxis=dict(range=[-v * 1.1, v * 1.1]),
+            zaxis=dict(range=[vmin * 1.1, max(vmax * 1.1, abs(vmin) * 0.1)]),
         ),
         updatemenus=[dict(
             type="buttons", showactive=False, y=1.05, x=0.05,

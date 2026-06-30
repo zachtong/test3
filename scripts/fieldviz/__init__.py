@@ -31,10 +31,19 @@ from pathlib import Path
 import numpy as np
 
 
+from scripts.fieldviz.palette import (                       # noqa: E402
+    WAFER_CMAP, SENSOR_PALETTE, SENSOR_MARKER_COLOR,
+    wafer_cmap_to_plotly, sensor_color,
+)
+
+
 __all__ = [
-    "mirror_d2", "render_full_disk", "shared_diverging_cmap",
+    "mirror_d2", "render_full_disk",
+    "shared_diverging_cmap", "wafer_value_range",
     "provenance_footer", "compute_bonded_mask",
     "front_radius_per_t", "FRONT_BONDED_FRAC_DEFAULT",
+    "WAFER_CMAP", "SENSOR_PALETTE", "SENSOR_MARKER_COLOR",
+    "wafer_cmap_to_plotly", "sensor_color",
 ]
 
 
@@ -79,7 +88,7 @@ def _full_disk_axes(x_canon: np.ndarray, y_canon: np.ndarray
 
 def render_full_disk(ax, field: np.ndarray, x_canon: np.ndarray,
                      y_canon: np.ndarray, *,
-                     cmap: str = "RdBu_r", vmin: float | None = None,
+                     cmap=None, vmin: float | None = None,
                      vmax: float | None = None,
                      mirror: bool = True, mask_off_disk: bool = True,
                      r_end: float = 1.0,
@@ -109,12 +118,15 @@ def render_full_disk(ax, field: np.ndarray, x_canon: np.ndarray,
         F = F.astype(np.float64, copy=True)
         F[off] = np.nan
     ext = [x_axis[0], x_axis[-1], y_axis[0], y_axis[-1]]
+    if cmap is None:
+        cmap = WAFER_CMAP
     # imshow expects (rows, cols) = (y, x); transpose so x runs horiz.
     im = ax.imshow(F.T, origin="lower", aspect="equal", extent=ext,
                    cmap=cmap, vmin=vmin, vmax=vmax,
                    interpolation="nearest")
     if sensor_xy is not None:
-        skw = dict(s=36, marker="x", c="red", linewidths=1.6, zorder=5)
+        skw = dict(s=42, marker="x", c=SENSOR_MARKER_COLOR,
+                   linewidths=1.8, zorder=5)
         if sensor_kwargs:
             skw.update(sensor_kwargs)
         ax.scatter(sensor_xy[:, 0], sensor_xy[:, 1], **skw)
@@ -132,6 +144,9 @@ def shared_diverging_cmap(field: np.ndarray,
     vmax = +V, where V is the larger of |percentile(pct_lo)| and
     |percentile(pct_hi)|. Percentile clipping prevents a single off-disk
     outlier from owning the scale; 1-99 is conservative.
+
+    Kept for backward compatibility; new viz should prefer
+    `wafer_value_range` paired with `WAFER_CMAP`.
     """
     finite = np.asarray(field)[np.isfinite(field)]
     if finite.size == 0:
@@ -142,6 +157,40 @@ def shared_diverging_cmap(field: np.ndarray,
         v = max(abs(lo), abs(hi))
         return -v, v
     return lo, hi
+
+
+def wafer_value_range(field: np.ndarray,
+                      pct_lo: float = 1.0, pct_hi: float = 99.0,
+                      clip_positive_to_zero: bool = True
+                      ) -> tuple[float, float]:
+    """vmin / vmax for the TEL WAFER_CMAP (sequential purple-to-yellow).
+
+    Wafer-bonding displacement is mostly negative (upper wafer descends
+    from rest toward the lower wafer), so the natural range is
+    asymmetric. Returns (vmin, vmax) with:
+
+      - vmin = 1st percentile (most-negative tail, clipped to ignore
+        a stray off-disk outlier)
+      - vmax = 99th percentile; if `clip_positive_to_zero` (default),
+        cap vmax at 0 so the colour bar's "0" end stays anchored at
+        the rest state (yellow) regardless of small positive numerical
+        noise
+
+    Pair with `cmap=WAFER_CMAP`: vmin -> purple (deepest descent),
+    vmax -> yellow (rest / unbonded).
+    """
+    finite = np.asarray(field)[np.isfinite(field)]
+    if finite.size == 0:
+        return -1.0, 0.0
+    vmin = float(np.percentile(finite, pct_lo))
+    vmax = float(np.percentile(finite, pct_hi))
+    if clip_positive_to_zero and vmax > 0:
+        vmax = 0.0
+    if vmax <= vmin:
+        # degenerate: all values equal. Give a unit range to avoid
+        # matplotlib divide-by-zero.
+        vmax = vmin + 1.0
+    return vmin, vmax
 
 
 def provenance_footer(fig, *, sim_id: str | None = None,

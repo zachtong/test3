@@ -50,10 +50,11 @@ from data.loader import load_dataset, preflight_npz           # noqa: E402
 from core.grid import canonical_grid                          # noqa: E402
 from core.sensors import SensorConfig, place_sensors          # noqa: E402
 from scripts.fieldviz import (mirror_d2, render_full_disk,    # noqa: E402
-                               shared_diverging_cmap,
+                               wafer_value_range,
                                provenance_footer,
                                compute_bonded_mask,
-                               front_radius_per_t)
+                               front_radius_per_t,
+                               WAFER_CMAP, SENSOR_MARKER_COLOR)
 
 
 def _load_one_canonical(raw_path: Path, nx: int, ny: int, nt: int,
@@ -86,7 +87,7 @@ def _native_scatter_frame(coords_xy, values, ax, vmin, vmax,
     physical scale (metres) directly.
     """
     sc = ax.scatter(coords_xy[:, 0], coords_xy[:, 1], c=values, s=2,
-                    cmap="RdBu_r", vmin=vmin, vmax=vmax,
+                    cmap=WAFER_CMAP, vmin=vmin, vmax=vmax,
                     edgecolors="none")
     # Outline the wafer quadrant in physical units.
     import matplotlib.patches as mpatches
@@ -187,7 +188,9 @@ def main() -> int:
     front_r = front_radius_per_t(bonded, x_canon, y_canon)
 
     # --- per-sim global vmin/vmax (one colour scale across the GIF) ---
-    vmin, vmax = shared_diverging_cmap(sim.f, symmetric=True)
+    # WAFER_CMAP is sequential so the range is naturally asymmetric:
+    # vmin = most-negative percentile, vmax clipped to 0 (rest state).
+    vmin, vmax = wafer_value_range(sim.f)
 
     # --- frame subsampling ---
     if nt > args.max_frames:
@@ -209,12 +212,15 @@ def main() -> int:
 
     fig, axes = plt.subplots(1, 2, figsize=(11, 5.2),
                              constrained_layout=True)
-    # Native side colour scale: in physical meters too, same per-sim limits
+    # Native side colour scale: in physical meters too, same per-sim
+    # limits. Use the same asymmetric range as the canonical side so the
+    # two panels read on a consistent palette (purple = deepest descent).
     nvmin = float(disp_native.min())
-    nvmax = float(disp_native.max())
-    nlim = max(abs(nvmin), abs(nvmax))
+    nvmax = min(float(disp_native.max()), 0.0)
+    if nvmax <= nvmin:
+        nvmax = nvmin + 1.0
     sc_native = _native_scatter_frame(
-        coords_native, disp_native[0], axes[0], -nlim, nlim,
+        coords_native, disp_native[0], axes[0], nvmin, nvmax,
         title=f"raw native (step_0000)  t-idx 0", R=0.15)
     cbar_n = fig.colorbar(sc_native, ax=axes[0], shrink=0.85,
                           label="displacement (m)")
@@ -243,7 +249,8 @@ def main() -> int:
         if bonded_mirrored[..., t_idx].any():
             cs = axes[1].contour(
                 x_full, y_full, bonded_mirrored[..., t_idx].T,
-                levels=[0.5], colors="lime", linewidths=1.5)
+                levels=[0.5], colors=[SENSOR_MARKER_COLOR],
+                linewidths=1.7)
             contour_handles.append(cs)
 
     _redraw_contour(frame_idx[0])

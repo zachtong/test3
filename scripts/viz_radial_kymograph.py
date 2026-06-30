@@ -37,10 +37,11 @@ if str(_root) not in sys.path:
     sys.path.insert(0, str(_root))
 
 from data.loader import load_dataset                         # noqa: E402
-from scripts.fieldviz import (shared_diverging_cmap,         # noqa: E402
+from scripts.fieldviz import (wafer_value_range,             # noqa: E402
                                provenance_footer,
                                compute_bonded_mask,
-                               front_radius_per_t)
+                               front_radius_per_t,
+                               WAFER_CMAP, SENSOR_MARKER_COLOR)
 
 
 def _sample_radial_kymograph(f: np.ndarray, x_canon: np.ndarray,
@@ -135,16 +136,12 @@ def main() -> int:
             sim.f.astype(np.float64), x_canon, y_canon, th, n_r=n_r)
         kymos.append(ky)
 
-    # Shared per-sim symmetric colour scale across all kymos.
+    # Shared per-sim colour range across all kymos. WAFER_CMAP is
+    # sequential (purple = deepest descent, yellow = rest); range is
+    # naturally asymmetric for wafer-bonding displacement.
     scaled = [k * args.value_scale for k in kymos]
-    all_finite = np.concatenate([k[np.isfinite(k)].ravel() for k in scaled])
-    if all_finite.size == 0:
-        v = 1.0
-    else:
-        v = float(max(abs(np.percentile(all_finite, 1)),
-                      abs(np.percentile(all_finite, 99))))
-    if v == 0:
-        v = 1.0
+    all_scaled = np.concatenate([k.ravel() for k in scaled])
+    vmin, vmax = wafer_value_range(all_scaled)
 
     # Bonded front (full 3D), then radius per t for overlay.
     bonded = compute_bonded_mask(
@@ -174,7 +171,7 @@ def main() -> int:
         im = ax.imshow(ky, origin="lower", aspect="auto",
                        extent=[t_axis[0], t_axis[-1],
                                r_axis[0], r_axis[-1]],
-                       vmin=-v, vmax=v, cmap="RdBu_r",
+                       vmin=vmin, vmax=vmax, cmap=WAFER_CMAP,
                        interpolation="nearest")
         ax.set_ylabel("r (normalised)")
         ax.set_title(f"theta = {th:g} deg", fontsize=10)
@@ -183,7 +180,7 @@ def main() -> int:
         # azimuthally averaged. Different angles may see the front at
         # slightly different radii in principle, but the scalar overlay
         # is the consistent project-wide measure.)
-        ax.plot(t_axis, front_r, color="lime", lw=1.2,
+        ax.plot(t_axis, front_r, color=SENSOR_MARKER_COLOR, lw=1.4,
                 label="bonded front (3D mean)")
         # Sensor radius markers for this theta.
         for r in sensor_by_th.get(round(th, 3), []):
