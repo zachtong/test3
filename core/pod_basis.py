@@ -1,18 +1,23 @@
 """Plain POD basis over a 3D Cartesian field (Nx, Ny, Nt).
 
-POD is just SVD on the snapshot matrix; the spatial dimensionality is
-absorbed by flattening (Nx, Ny) -> Nx*Ny. The interface deliberately mirrors
-the 2D `wafer_bonding_sparse_recon` `PODBasis` so downstream training and
-evaluation code (dataset builder, scorer, baselines, bundle packager) ports
-without case-splits on dimensionality:
+POD is the SVD of the snapshot matrix X of shape (Nx*Ny, N_sim*Nt). For
+the firehorse2-scale data (Nx=Ny=128, Nt=300, N_sim=5500) X is 108 GB --
+too big to assemble even on a 1 TB workstation when intermediate GEMM
+buffers are counted. fit() therefore uses the streaming method-of-
+snapshots: accumulate the spatial Gram C = sum_i F_i F_i^T one
+simulation at a time (C is only (Nx*Ny, Nx*Ny) float64 = 2 GB for
+Nx=128), then eigh(C) for the top-K modes. RAM peak ~2.5 GB regardless
+of how many sims are passed in.
+
+Interface mirrors the 2D `wafer_bonding_sparse_recon` PODBasis so
+downstream training and evaluation code (dataset builder, scorer,
+baselines, bundle packager) ports without case-splits on dimensionality:
 
   fit / project_sim / project_ensemble / reconstruct / energy_fraction
   uses_front = False  (no co-moving shift; no front channel)
 
-Implementation: method of snapshots on the (Nx*Ny, Nx*Ny) covariance, so
-memory is independent of the simulation count. The wafer-disk mask (off-disk
-cells) is currently NOT enforced here -- callers can zero the off-disk
-region before passing sims in, or pass it in via a future `mask=` kwarg.
+The wafer-disk mask (off-disk cells) is not enforced here -- the loader
+already zeroes them in sim.f before fit() sees them.
 """
 
 from __future__ import annotations
@@ -35,52 +40,64 @@ class PODBasis:
         self.spatial_shape = spatial_shape
 
     @classmethod
-    def fit(cls, sims: Iterable[Simulation], K: int) -> "PODBasis":
-        """Fit POD on the snapshot matrix; pick the smaller Gram side.
+    def fit(cls, sims: Iterable[Simulation], K: int,
+            verbose: bool = True) -> "PODBasis":
+        """Fit POD via streaming method of snapshots.
 
-        Standard SVD identity: phi_k can come from either
-          (a) eig of the SPATIAL Gram  X X^T, size (n_space, n_space)
-          (b) eig of the SNAPSHOT Gram X^T X, size (n_snap, n_snap),
-              then Phi = X V / sigma  (Sirovich's method of snapshots).
+        C = sum_i F_i F_i^T is accumulated one simulation at a time, so
+        peak RAM is the spatial Gram (Nx*Ny, Nx*Ny) float64 plus one
+        per-sim slice (Nx*Ny, Nt) float64 -- never the whole snapshot
+        matrix. Identical algorithm to the 2D PODBasis.fit; the
+        comments call it 'streaming' here because at 3D resolutions the
+        single-shot version actually matters.
 
-        2D wafer_bonding_sparse_recon used (a) because n_space ~= 1000.
-        In 3D n_space = Nx*Ny easily hits 10^4-10^5 so the (a) Gram and its
-        O(n_space^3) eigh blow up; switch to whichever side is smaller.
-
-        Note: assumes the snapshot matrix X = [F_1 | F_2 | ...] fits in RAM
-        once (no streaming). For 128x128, Nt=300, 500 sims that's
-        128*128*300*500*8 B ~= 24 GB -- on a workstation this is fine but
-        not on a laptop. A streaming/randomized variant is future work.
+        Args:
+            sims: iterable of Simulation; each `sim.f` is (Nx, Ny, Nt)
+                  with the same (Nx, Ny). Iteration order is not
+                  significant -- C is order-invariant.
+            K: number of leading POD modes to return.
+            verbose: print one progress line every 5 s during the
+                  accumulation loop (set False for unit tests).
         """
+        import time
         sims = list(sims)
         if not sims:
             raise ValueError("PODBasis.fit: empty sim list")
         nx, ny, _ = sims[0].f.shape
         n_space = nx * ny
 
-        cols = [np.asarray(s.f, dtype=np.float64).reshape(n_space, -1)
-                for s in sims]
-        X = np.concatenate(cols, axis=1)                 # (n_space, n_snap)
-        n_snap = X.shape[1]
+        # Streaming accumulate the spatial Gram. float64 to keep
+        # eigh well-conditioned -- the per-sim outer products are tiny
+        # numbers (displacement ~1e-4 m) so single precision would
+        # underflow on a 5500-sim sum.
+        C = np.zeros((n_space, n_space), dtype=np.float64)
+        n_sims = len(sims)
+        t0 = time.time()
+        last = [0.0]
+        for i, s in enumerate(sims, 1):
+            F = np.asarray(s.f, dtype=np.float64).reshape(n_space, -1)
+            C += F @ F.T
+            now = time.time()
+            if verbose and (now - last[0] >= 5.0 or i == n_sims):
+                rate = i / max(now - t0, 1e-9)
+                eta_min = (n_sims - i) / max(rate, 1e-9) / 60.0
+                print(f"  POD streaming Gram: {i}/{n_sims} sim "
+                      f"({100.0 * i / n_sims:.1f}%)  "
+                      f"{rate:.1f}/s  ETA {eta_min:.1f} min",
+                      flush=True)
+                last[0] = now
 
-        if n_snap <= n_space:
-            # Snapshot-side Gram is smaller -- standard method of snapshots.
-            G = X.T @ X                                   # (n_snap, n_snap)
-            w, V = np.linalg.eigh(G)
-            order = np.argsort(w)[::-1][:K]
-            sigma2 = np.clip(w[order], 0.0, None)
-            sigma = np.sqrt(sigma2)
-            V_k = V[:, order]
-            Phi = np.zeros((n_space, K), dtype=np.float64)
-            nz = sigma > 1e-12
-            Phi[:, nz] = (X @ V_k[:, nz]) / sigma[nz]
-        else:
-            # Spatial-side Gram is smaller -- match the 2D codepath exactly.
-            C = X @ X.T                                   # (n_space, n_space)
-            w, V = np.linalg.eigh(C)
-            order = np.argsort(w)[::-1][:K]
-            Phi = np.ascontiguousarray(V[:, order])
-            sigma = np.sqrt(np.clip(w[order], 0.0, None))
+        if verbose:
+            print(f"  POD eigh on ({n_space}, {n_space}) ...", flush=True)
+        t_eigh = time.time()
+        w, V = np.linalg.eigh(C)                         # ascending
+        order = np.argsort(w)[::-1][:K]
+        Phi = np.ascontiguousarray(V[:, order])
+        sigma = np.sqrt(np.clip(w[order], 0.0, None))
+        if verbose:
+            print(f"  POD eigh: {time.time() - t_eigh:.0f}s  "
+                  f"total fit: {(time.time() - t0) / 60.0:.1f} min",
+                  flush=True)
         return cls(Phi=Phi, sigma=sigma, spatial_shape=(nx, ny))
 
     def project_sim(self, sim: Simulation) -> np.ndarray:

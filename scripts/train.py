@@ -29,8 +29,8 @@ from training.loop import train_one_seed
 from training.checkpoint import (checkpoint_path, history_path, latest_path,
                                   save_checkpoint, load_checkpoint)
 from training.normalization import save_norm_stats
+from training.basis_cache import load_or_fit_basis
 from core.sensors import SensorConfig
-from core.pod_basis import PODBasis
 from data.loader import load_dataset
 from data.splitter import split_dataset
 from models import create_model
@@ -99,12 +99,21 @@ def main() -> None:
     test_sims = split["test_sims"]
     print(f"split: {len(train_sims)}/{len(val_sims)}/{len(test_sims)}")
 
-    # basis: lab-frame POD, fit on train + val
-    t0 = time.time()
-    basis = PODBasis.fit(train_sims + val_sims, K=cfg.pod.k)
+    # basis: lab-frame POD fit on (train + val), cached on disk so a
+    # re-run at the same data + split + grid + K reuses the SVD.
+    # k_cache > pod.k stores extra modes so future runs at any K <=
+    # k_cache also hit the cache without refitting.
+    basis = load_or_fit_basis(
+        train_sims + val_sims, K=cfg.pod.k,
+        npz_dir=cfg.data.npz_dir, nx=cfg.data.nx, ny=cfg.data.ny,
+        nt=cfg.data.nt, x_end=cfg.data.x_end, y_end=cfg.data.y_end,
+        drop_first_steps=cfg.data.drop_first_steps,
+        seed=cfg.data.seed, train_frac=cfg.data.train_frac,
+        val_frac=cfg.train.val_frac,
+        cache_dir=cfg.basis_cache_dir, k_cache=cfg.pod.k_cache,
+        force_refit=cfg.pod.force_refit)
     print(f"POD K={cfg.pod.k}  sigma ratio="
-          f"{(basis.sigma / basis.sigma[0]).round(4).tolist()}  "
-          f"({time.time() - t0:.1f}s)")
+          f"{(basis.sigma / basis.sigma[0]).round(4).tolist()}")
 
     # datasets (sensor_cfg mirrors training.config.SensorConfig)
     scfg = SensorConfig(n=cfg.sensors.n, strategy=cfg.sensors.strategy,

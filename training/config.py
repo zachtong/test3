@@ -27,6 +27,15 @@ class SensorConfig:
 @dataclass(frozen=True)
 class PODConfig:
     k: int = 8
+    # Number of modes the basis_cache stores per fit. POD modes are
+    # nested in K, so a single cached fit with k_cache >= K satisfies
+    # any future K request without recomputing. Default 16 lets you
+    # sweep K = 4 / 8 / 16 from a single SVD.
+    k_cache: int = 16
+    # Bypass the basis cache and refit even on a hit. Use only when
+    # the underlying NPZ data was edited in place and you know the
+    # cache key would not change but the contents would.
+    force_refit: bool = False
 
 
 @dataclass(frozen=True)
