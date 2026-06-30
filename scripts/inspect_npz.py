@@ -454,6 +454,15 @@ def main() -> int:
                     "discard the first N waferData steps' samples before "
                     "canonicalize so the snapshot reflects what training "
                     "will actually see. Default 0 = no trim.")
+    ap.add_argument("--scan-workers", type=int, default=16,
+                    help="parallel worker count for Mode 1's compact-path "
+                    "preflight scan. Default 16. Set to 1 to disable "
+                    "parallelism, e.g. for debugging.")
+    ap.add_argument("--max-scan", type=int, default=0,
+                    help="cap Mode 1's scan to the first N files in the "
+                    "folder. Default 0 = scan all. Useful when the folder "
+                    "is huge (5000+ files) and you just want a quick "
+                    "preview before committing to the full scan.")
     args = ap.parse_args()
 
     folder = Path(args.npz_dir).expanduser().resolve()
@@ -470,51 +479,85 @@ def main() -> int:
     # The schema scan visits every file in the folder so we can report
     # the full set of bad ones, then continues to the loader test. This
     # is the policy change from prior versions: bad files don't abort
-    # the inspector.
-    print(f"\n=== MODE 1: schema scan ({len(files)} file(s)) ===")
+    # the inspector. On large folders the scan is parallelised across
+    # processes (preflight is pure I/O + metadata; pickles fine), and
+    # OK lines are suppressed to keep terminal output tractable -- only
+    # BAD lines + a progress tick every 5s reach the screen.
+    scan_files = files if args.max_scan <= 0 else files[: args.max_scan]
+    print(f"\n=== MODE 1: schema scan ({len(scan_files)} file(s) of "
+          f"{len(files)} total{', --max-scan capped' if args.max_scan > 0 and len(files) > args.max_scan else ''}) ===")
     from data.loader import preflight_npz                       # noqa: E402
     bad_files: list[tuple[Path, list[str]]] = []
     warnings_count = 0
     good_set: list[Path] = []     # files that pass preflight, kept for MODE 2
 
-    for i, p in enumerate(files):
-        verbose = i < args.schema_verbose
-        # preflight is the authoritative "will the loader accept this"
-        # decision; it strictly extends validate_invariants (adds
-        # sample_step_index range + sample_tReal monotonicity), so a
-        # file can fail preflight while still passing the verbose-mode
-        # invariant report. Run preflight in BOTH modes and let it
-        # govern good_set / bad_files; verbose mode adds the richer
-        # validate_invariants per-error spelling on top.
+    # Verbose pass: serial, first --schema-verbose files. The detailed
+    # dump only makes sense in order and on a handful of files.
+    verbose_n = min(args.schema_verbose, len(scan_files))
+    for i, p in enumerate(scan_files[:verbose_n]):
         ok, reason = preflight_npz(p)
-        if verbose:
-            summary = report_schema(p)
-            errs, warns = validate_invariants(p, summary)
-            for w in warns:
-                print(f"  WARN:  {w}")
-            for e in errs:
-                print(f"  ERROR: {e}")
-            warnings_count += len(warns)
-            # Prefer invariant errors if any (more specific), otherwise
-            # fall back to the preflight reason. Either way, if preflight
-            # said "no", the file MUST land in bad_files.
-            reasons = list(errs)
-            if not ok and not any(reason and reason in e for e in reasons):
-                reasons.append(f"preflight: {reason}")
-                print(f"  ERROR: preflight: {reason}")
-            if reasons:
-                bad_files.append((p, reasons))
-        else:
-            if ok:
-                print(f"  {p.name}: OK")
-            else:
-                bad_files.append((p, [reason or "preflight failed"]))
-                print(f"  {p.name}: BAD -- {reason}")
+        summary = report_schema(p)
+        errs, warns = validate_invariants(p, summary)
+        for w in warns:
+            print(f"  WARN:  {w}")
+        for e in errs:
+            print(f"  ERROR: {e}")
+        warnings_count += len(warns)
+        reasons = list(errs)
+        if not ok and not any(reason and reason in e for e in reasons):
+            reasons.append(f"preflight: {reason}")
+            print(f"  ERROR: preflight: {reason}")
+        if reasons:
+            bad_files.append((p, reasons))
         if ok:
             good_set.append(p)
 
+    # Compact pass: parallel preflight over the remaining files.
+    remaining = scan_files[verbose_n:]
+    if remaining:
+        workers = max(1, args.scan_workers)
+        workers = min(workers, len(remaining))
+        print(f"  parallel scan: {len(remaining)} file(s), "
+              f"{workers} worker(s); only BAD files are printed.",
+              flush=True)
+        t0_scan = time.time()
+        last_tick = [0.0]
+
+        def _tick(done: int, n_total: int, n_bad: int) -> None:
+            now = time.time()
+            if now - last_tick[0] >= 5.0 or done == n_total:
+                rate = done / max(now - t0_scan, 1e-9)
+                eta_min = (n_total - done) / max(rate, 1e-9) / 60.0
+                print(f"  scan: {done}/{n_total} "
+                      f"({100.0 * done / n_total:.1f}%)  "
+                      f"{rate:.0f}/s  ETA {eta_min:.1f} min  "
+                      f"(bad so far: {n_bad})", flush=True)
+                last_tick[0] = now
+
+        from concurrent.futures import ProcessPoolExecutor      # noqa: E402
+        if workers <= 1:
+            for i, p in enumerate(remaining, 1):
+                ok, reason = preflight_npz(p)
+                if ok:
+                    good_set.append(p)
+                else:
+                    bad_files.append((p, [reason or "preflight failed"]))
+                    print(f"  BAD  {p.name}: {reason}", flush=True)
+                _tick(i, len(remaining), len(bad_files))
+        else:
+            with ProcessPoolExecutor(max_workers=workers) as ex:
+                # ex.map preserves input order so we can pair with `remaining`.
+                results = ex.map(preflight_npz, remaining, chunksize=16)
+                for i, (p, (ok, reason)) in enumerate(zip(remaining, results), 1):
+                    if ok:
+                        good_set.append(p)
+                    else:
+                        bad_files.append((p, [reason or "preflight failed"]))
+                        print(f"  BAD  {p.name}: {reason}", flush=True)
+                    _tick(i, len(remaining), len(bad_files))
+
     print(f"\n=== schema scan summary ===")
-    print(f"  total files: {len(files)}")
+    print(f"  files scanned: {len(scan_files)} (of {len(files)} in folder)")
     print(f"  pass preflight: {len(good_set)}")
     print(f"  fail preflight: {len(bad_files)}")
     if bad_files:
