@@ -578,8 +578,38 @@ def _build_one(args):
         raise ValueError(f"{p.name}: sample_tReal has zero span.")
     s = (treal - treal.min()) / span                                   # (S,)
 
-    # Collapse exact / sub-step duplicates at step boundaries (same as 2D).
-    s_u, keep_t = np.unique(s, return_index=True)
+    # Force temporal monotonicity + collapse step-boundary duplicates.
+    #
+    # tReal may briefly go backward at COMSOL step boundaries (preflight
+    # accepts up to _TREAL_BACKWARD_FACTOR * median dt). A naive
+    # np.unique + return_index=True would SORT by tReal value, so a
+    # sample with (native index=k+2, tReal earlier than k+1) gets
+    # reordered before native index k+1 -- and since bonding is
+    # monotonic descent in native-order, that sample carries a MORE
+    # descended state than its neighbour at the same-looking tReal.
+    # Interpolating over the reordered sequence produces a visible
+    # "wafer rebound" in 3D viz: the upper wafer briefly rises then
+    # descends again. It is not a physical event, it is a
+    # canonicalization artifact.
+    #
+    # Fix in two steps:
+    #   1. Cumulative-max on s -- forces tReal to be non-decreasing,
+    #      clamping any backward jump to the running max. Native-index
+    #      order is preserved; a sample recorded with earlier-than-max
+    #      tReal is treated as if it happened at the running-max time.
+    #   2. Keep the LAST native index in each run of equal clamped time.
+    #      This is the most physically-progressed sample at that instant
+    #      (bonding has advanced further between duplicates), and matches
+    #      the "final state at boundary" semantics COMSOL uses when a
+    #      step is re-simulated.
+    s_mono = np.maximum.accumulate(s)                                  # (S,)
+    # `change_next[i]` = True iff s_mono[i+1] > s_mono[i], plus a final
+    # True so the last sample is always kept. np.where picks the indices
+    # of runs' last elements.
+    change_next = np.concatenate(
+        [s_mono[1:] > s_mono[:-1], np.array([True])])
+    keep_t = np.where(change_next)[0]
+    s_u = s_mono[keep_t]
     f_flat = f_stack.reshape(S, nx * ny)[keep_t].T                      # (Nx*Ny, S_u)
     bf_u = bf[keep_t]
     f_canon_flat = _interp_rows(t_canon, s_u, f_flat)                   # (Nx*Ny, Nt)

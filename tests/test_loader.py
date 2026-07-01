@@ -306,6 +306,85 @@ def test_drop_first_steps_too_many_raises(tmp_path):
                      workers=1, drop_first_steps=5)
 
 
+def test_loader_backward_treal_does_not_produce_rebound(tmp_path):
+    """Rebound regression: an NPZ with a small tReal backward jump that
+    preflight tolerates must NOT produce a non-monotonic loaded field.
+
+    Mechanism: the loader used to call np.unique on the normalized
+    tReal for de-dup, which SORTS by value. When tReal has a small
+    backward jump (e.g. native samples with tReal 0.10, 0.11, 0.09,
+    0.12), the reordered sequence would pull u_z out of physical
+    order -- a later-native-index sample (more descended) would get
+    placed before an earlier one, so the reconstructed field showed
+    the upper wafer briefly rising before descending again.
+
+    This test constructs an NPZ whose underlying u_z is STRICTLY
+    monotonically non-increasing in native-index order, then injects
+    a single sub-step backward jump in sample_tReal. After the fix,
+    the loaded field must remain monotonically non-increasing along
+    the time axis at every in-disk cell. Before the fix this test
+    fails: some cells briefly INCREASE at one interior canonical
+    time step.
+    """
+    p = tmp_path / "rebound_repro.npz"
+    make_mock_3d_npz(p, **_good_mock_kwargs())
+    # Load original payload, mutate:
+    #   1. Rewrite step_*_displacement_z_corrected_upper so u_z is a
+    #      STRICTLY decreasing linear ramp from 0 down to a negative
+    #      value, keyed on native-index order. Physics: upper wafer
+    #      descends monotonically.
+    #   2. Inject one backward jump in sample_tReal at a location well
+    #      inside preflight's tolerance.
+    with np.load(p, allow_pickle=True) as z:
+        payload = {k: z[k] for k in z.files}
+    S = int(payload["num_samples"])
+    n_steps = int(payload["num_wafer_steps"])
+    # For each step, rebuild displacement_z_upper as a linear ramp in
+    # native-index order (spatially uniform for simplicity). Native
+    # index of a step's sample j is: sum(t_per_step[:i]) + j.
+    global_idx = 0
+    for i in range(n_steps):
+        prefix = f"step_{i:04d}"
+        disp = payload[f"{prefix}_displacement_z_corrected_upper"]
+        Ti, N_up = disp.shape
+        # Global-native-index for each of this step's samples
+        gi = np.arange(global_idx, global_idx + Ti)
+        # Linear ramp: sample 0 -> 0.0, sample S-1 -> -20e-6 (metres).
+        u_ramp = -20e-6 * (gi / max(S - 1, 1))
+        # broadcast across N_up: all cells share the ramp
+        payload[f"{prefix}_displacement_z_corrected_upper"] = (
+            np.broadcast_to(u_ramp[:, None], (Ti, N_up)).astype(np.float32).copy())
+        global_idx += Ti
+    # Inject a single backward jump in sample_tReal at index ~S//2.
+    # Preflight tolerates up to _TREAL_BACKWARD_FACTOR * median dt =
+    # 10x. We use ~0.5x median dt so it clearly passes preflight but
+    # would trigger the sort scramble bug in the old canonicalizer.
+    treal = payload["sample_tReal"].astype(np.float64).copy()
+    dt = float(np.median(np.diff(treal)))
+    mid = S // 2
+    treal[mid] = treal[mid - 1] - 0.5 * dt   # backward by half a dt
+    payload["sample_tReal"] = treal
+    np.savez(p, **payload)
+
+    # Load and assert monotonicity along t at every canonical (x, y).
+    x, y, sims = load_dataset(tmp_path, nx=16, ny=16, nt=32,
+                              cache=False, workers=1)
+    assert sims, "loader unexpectedly rejected the fixture"
+    f = sims[0].f                                             # (Nx, Ny, Nt)
+    # Compute per-cell diff along t; positive diffs = rising = rebound
+    diff = np.diff(f, axis=-1)                                # (Nx, Ny, Nt-1)
+    # Interior-cell mask: within the disk (avoid off-disk zeros)
+    X, Y = np.meshgrid(x, y, indexing="ij")
+    in_disk = (X * X + Y * Y) <= 0.99
+    max_rise = float(diff[in_disk].max())
+    # Post-fix tolerance: allow tiny float32 noise (~1e-7 m); the
+    # pre-fix bug produced spikes of order ~1e-6 (5% of the ramp).
+    assert max_rise < 1e-9, (
+        f"loaded field has a rebound of magnitude {max_rise:.3e} m "
+        f"despite native-index-order monotonic descent; the "
+        f"tReal backward-jump canonicalization bug is back.")
+
+
 def test_preflight_tolerates_small_treal_overlap(tmp_path):
     """A backward jump of a few sub-step samples must NOT fail preflight.
 
