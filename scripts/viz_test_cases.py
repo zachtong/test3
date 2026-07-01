@@ -72,7 +72,9 @@ if str(_root) not in sys.path:
 
 from scripts.fieldviz import (render_full_disk, provenance_footer,  # noqa: E402
                                WAFER_CMAP, SENSOR_MARKER_COLOR,
-                               wafer_value_range)
+                               wafer_value_range, mirror_d2,
+                               wafer_cmap_to_plotly)
+from scripts.fieldviz.render3d import estimate_lower_z             # noqa: E402
 
 
 _TEST_CACHE_PREFIX = "_test_"
@@ -367,6 +369,245 @@ def _render_radial_anim(out_path, *, w_true_m, w_pred_m,
     plt.close(fig)
 
 
+def _render_interactive_compare(out_path, *, w_true_m, w_pred_m,
+                                  x_canon, y_canon, sensor_xy,
+                                  sim_id, tag, rel_l2, test_idx,
+                                  sel_label, results_path,
+                                  value_scale=1.0e6, max_frames=60,
+                                  show_lower=False):
+    """3-subplot Plotly HTML: GT / Predicted / |GT - Pred| as 3D
+    surfaces sharing a time slider. Full disk via D2 mirror. Camera
+    preset buttons switch all 3 scenes at once (Iso / Top / Side).
+    Sensor markers appear on GT and Pred; the error panel has no
+    sensors (they would clutter the artifact view).
+
+    Output: standalone HTML embedding plotly.js from CDN. Viewable in
+    any browser with WebGL (the interactive layout's whole point). No
+    WebGL fallback -- if the operator does not have WebGL they should
+    use the kymo / radial_anim / snapshot layouts instead."""
+    try:
+        import plotly.graph_objects as go
+    except ImportError:
+        print(f"  interactive_compare: plotly not installed; skipping",
+              flush=True)
+        return
+    try:
+        from plotly.subplots import make_subplots
+    except ImportError:
+        print(f"  interactive_compare: plotly.subplots missing; "
+              f"skipping", flush=True)
+        return
+
+    Nt = w_true_m.shape[-1]
+    if Nt > max_frames:
+        frame_idx = np.linspace(0, Nt - 1, max_frames).astype(int)
+    else:
+        frame_idx = np.arange(Nt)
+
+    # Full disk axes
+    x_full = np.concatenate([-x_canon[:0:-1], x_canon])
+    y_full = np.concatenate([-y_canon[:0:-1], y_canon])
+    X, Y = np.meshgrid(x_full, y_full, indexing="ij")
+    in_disk = (X * X + Y * Y) <= 1.0
+
+    def _mask_scale(w_3d):
+        out = []
+        for t in frame_idx:
+            full = mirror_d2(w_3d[..., int(t)]) * value_scale
+            full = full.astype(np.float64)
+            full[~in_disk] = np.nan
+            out.append(full)
+        return out
+
+    z_gt = _mask_scale(w_true_m)
+    z_pr = _mask_scale(w_pred_m)
+    z_err = _mask_scale(np.abs(w_true_m - w_pred_m))
+
+    # Shared color range for GT+Pred, so the eye compares apples to
+    # apples across those two panels. Error gets its own viridis
+    # scale starting at 0.
+    finite = np.concatenate(
+        [z[np.isfinite(z)].ravel() for z in z_gt]
+        + [z[np.isfinite(z)].ravel() for z in z_pr])
+    vmin, vmax = wafer_value_range(finite)
+    finite_err = np.concatenate(
+        [z[np.isfinite(z)].ravel() for z in z_err])
+    err_max = (float(np.percentile(finite_err, 99))
+                if finite_err.size else 1.0)
+    if err_max <= 0:
+        err_max = 1e-12
+    wafer_scale = wafer_cmap_to_plotly()
+
+    fig = make_subplots(
+        rows=1, cols=3,
+        specs=[[{"type": "surface"}, {"type": "surface"},
+                 {"type": "surface"}]],
+        subplot_titles=("GT", "Predicted", "|GT - Pred|"),
+        horizontal_spacing=0.02)
+
+    # Initial traces (frame 0). Each row=1, col=N assignment routes
+    # the trace to sceneN under the hood.
+    fig.add_trace(go.Surface(
+        x=X, y=Y, z=z_gt[0],
+        cmin=vmin, cmax=vmax, colorscale=wafer_scale,
+        colorbar=dict(x=0.28, thickness=15,
+                       title=f"u_z * {value_scale:g}"),
+        hovertemplate=("GT<br>x=%{x:.2f} y=%{y:.2f} "
+                       "u_z=%{z:.3g}<extra></extra>")),
+        row=1, col=1)
+    fig.add_trace(go.Surface(
+        x=X, y=Y, z=z_pr[0],
+        cmin=vmin, cmax=vmax, colorscale=wafer_scale,
+        showscale=False,
+        hovertemplate=("Pred<br>x=%{x:.2f} y=%{y:.2f} "
+                       "u_z=%{z:.3g}<extra></extra>")),
+        row=1, col=2)
+    fig.add_trace(go.Surface(
+        x=X, y=Y, z=z_err[0],
+        cmin=0.0, cmax=err_max, colorscale="Viridis",
+        colorbar=dict(x=1.0, thickness=15,
+                       title=f"|err| * {value_scale:g}"),
+        hovertemplate=("|err|<br>x=%{x:.2f} y=%{y:.2f} "
+                       "val=%{z:.3g}<extra></extra>")),
+        row=1, col=3)
+
+    # Sensor markers on GT and Pred panels (skip error to reduce
+    # clutter). Sensors are static, so keep them out of frames data
+    # so they persist during playback.
+    if sensor_xy is not None and len(sensor_xy):
+        for col, z_arr, scene_key in [(1, z_gt[0], "scene"),
+                                        (2, z_pr[0], "scene2")]:
+            sz = []
+            for sx, sy in sensor_xy:
+                ix = int(np.argmin(np.abs(X[:, 0] - sx)))
+                iy = int(np.argmin(np.abs(Y[0, :] - sy)))
+                v = z_arr[ix, iy]
+                sz.append(float(v) if np.isfinite(v) else 0.0)
+            fig.add_trace(go.Scatter3d(
+                x=sensor_xy[:, 0], y=sensor_xy[:, 1], z=sz,
+                mode="markers",
+                marker=dict(size=6, color="magenta", symbol="x"),
+                name=f"sensors ({['GT', 'Pred'][col - 1]})",
+                showlegend=(col == 1)),
+                row=1, col=col)
+
+    # Optional lower-wafer plane on GT and Pred panels (static).
+    if show_lower:
+        lower_z = estimate_lower_z(np.asarray(w_true_m, dtype=np.float64))
+        Z_lower = np.full_like(X, lower_z * value_scale, dtype=np.float64)
+        Z_lower[~in_disk] = np.nan
+        for col in (1, 2):
+            fig.add_trace(go.Surface(
+                x=X, y=Y, z=Z_lower,
+                surfacecolor=np.zeros_like(Z_lower),
+                colorscale=[[0, "rgb(140,140,140)"],
+                             [1, "rgb(140,140,140)"]],
+                showscale=False, opacity=0.30,
+                name="lower wafer", showlegend=(col == 1),
+                hovertemplate="lower wafer<extra></extra>"),
+                row=1, col=col)
+
+    # Animation frames: each frame replaces the 3 surface traces
+    # (indices 0, 1, 2). Sensors + lower-wafer are indices 3+ and
+    # stay static.
+    frames = []
+    for i, t in enumerate(frame_idx):
+        frames.append(go.Frame(
+            data=[
+                go.Surface(z=z_gt[i], x=X, y=Y,
+                            cmin=vmin, cmax=vmax,
+                            colorscale=wafer_scale, showscale=True),
+                go.Surface(z=z_pr[i], x=X, y=Y,
+                            cmin=vmin, cmax=vmax,
+                            colorscale=wafer_scale, showscale=False),
+                go.Surface(z=z_err[i], x=X, y=Y,
+                            cmin=0.0, cmax=err_max,
+                            colorscale="Viridis", showscale=True),
+            ],
+            traces=[0, 1, 2],
+            name=str(int(t))))
+    fig.frames = frames
+
+    # Camera presets applied to all 3 scenes simultaneously.
+    iso = dict(eye=dict(x=1.5, y=1.5, z=1.5))
+    top = dict(eye=dict(x=0.01, y=0.01, z=2.5))
+    side = dict(eye=dict(x=2.5, y=0.01, z=0.01))
+    z_range_wafer = [vmin * 1.1, max(vmax * 1.1, abs(vmin) * 0.1)]
+    z_range_err = [0.0, err_max * 1.1]
+
+    def _cam_args(cam):
+        return [{"scene.camera": cam,
+                  "scene2.camera": cam,
+                  "scene3.camera": cam}]
+
+    fig.update_layout(
+        title=dict(text=(f"{tag}  |  {sel_label}  |  "
+                          f"test_idx={int(test_idx)}  |  "
+                          f"rel-L2={rel_l2:.4f}  |  {sim_id}"),
+                    x=0.5, xanchor="center"),
+        scene=dict(camera=iso,
+                    aspectratio=dict(x=1, y=1, z=0.4),
+                    xaxis=dict(range=[-1.05, 1.05]),
+                    yaxis=dict(range=[-1.05, 1.05]),
+                    zaxis=dict(range=z_range_wafer,
+                                title=f"u_z*{value_scale:g}")),
+        scene2=dict(camera=iso,
+                     aspectratio=dict(x=1, y=1, z=0.4),
+                     xaxis=dict(range=[-1.05, 1.05]),
+                     yaxis=dict(range=[-1.05, 1.05]),
+                     zaxis=dict(range=z_range_wafer,
+                                 title=f"u_z*{value_scale:g}")),
+        scene3=dict(camera=iso,
+                     aspectratio=dict(x=1, y=1, z=0.4),
+                     xaxis=dict(range=[-1.05, 1.05]),
+                     yaxis=dict(range=[-1.05, 1.05]),
+                     zaxis=dict(range=z_range_err,
+                                 title=f"|err|*{value_scale:g}")),
+        updatemenus=[
+            dict(type="buttons", direction="left",
+                  x=0.5, xanchor="center", y=1.10, yanchor="bottom",
+                  showactive=False, pad=dict(t=0, b=6),
+                  buttons=[
+                      dict(label="Iso", method="relayout",
+                            args=_cam_args(iso)),
+                      dict(label="Top", method="relayout",
+                            args=_cam_args(top)),
+                      dict(label="Side", method="relayout",
+                            args=_cam_args(side)),
+                  ]),
+            dict(type="buttons", direction="left",
+                  x=0.02, xanchor="left", y=1.10, yanchor="bottom",
+                  showactive=False,
+                  buttons=[
+                      dict(label="Play", method="animate",
+                            args=[None,
+                                  dict(frame=dict(duration=100,
+                                                    redraw=True),
+                                        fromcurrent=True,
+                                        transition=dict(duration=0))]),
+                      dict(label="Pause", method="animate",
+                            args=[[None],
+                                  dict(frame=dict(duration=0,
+                                                    redraw=False),
+                                        mode="immediate")]),
+                  ]),
+        ],
+        sliders=[dict(
+            active=0, currentvalue=dict(prefix="t-idx: "),
+            steps=[dict(method="animate", label=str(int(t)),
+                          args=[[str(int(t))],
+                                dict(frame=dict(duration=0,
+                                                  redraw=True),
+                                     mode="immediate")])
+                     for t in frame_idx])],
+        margin=dict(l=10, r=10, t=100, b=10),
+    )
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.write_html(str(out_path), include_plotlyjs="cdn",
+                    full_html=True, auto_play=False)
+
+
 def _render_kymo_compare(out_path, *, w_true_m, w_pred_m, x_canon,
                           y_canon, angles, sim_id, tag, rel_l2,
                           test_idx, sel_label, results_path,
@@ -543,6 +784,11 @@ def main() -> int:
                     "the real one does'. Filename: <slot>_relL2*"
                     "_radial.gif\n"
                     "'both' is a legacy alias for 'snapshot,kymo'.")
+    ap.add_argument("--show-lower", action="store_true",
+                    help="only used by --layout interactive_compare: "
+                    "add a translucent gray lower-wafer reference "
+                    "plane on the GT and Pred subplots so the "
+                    "bonding gap is visually obvious")
     ap.add_argument("--kymo-angles", default="0,45,90",
                     help="comma list of theta values (deg) for the "
                     "kymo layout (default: 0,45,90 -- lab rig)")
@@ -694,7 +940,8 @@ def main() -> int:
     if "both" in layout_list:
         layout_list = [l for l in layout_list if l != "both"] + [
             "snapshot", "kymo"]
-    valid_layouts = {"snapshot", "kymo", "radial_anim"}
+    valid_layouts = {"snapshot", "kymo", "radial_anim",
+                      "interactive_compare"}
     unknown_layouts = [l for l in layout_list if l not in valid_layouts]
     if unknown_layouts:
         print(f"unknown --layout(s): {unknown_layouts}; valid: "
@@ -704,6 +951,7 @@ def main() -> int:
     want_snapshot = "snapshot" in layout_list
     want_kymo = "kymo" in layout_list
     want_radial_anim = "radial_anim" in layout_list
+    want_interactive_compare = "interactive_compare" in layout_list
 
     total_files = 0
     for s in selections:
@@ -769,6 +1017,23 @@ def main() -> int:
                     results_path=results_path,
                     value_scale=args.value_scale)
                 print(f"  wrote {rad_out}", flush=True)
+                total_files += 1
+            if want_interactive_compare:
+                ic_out = this_dir / f"{base_name}_compare.html"
+                _render_interactive_compare(
+                    ic_out,
+                    w_true_m=out_data["w_true"][slot],
+                    w_pred_m=out_data["w_pred"][slot],
+                    x_canon=out_data["x_canon"],
+                    y_canon=out_data["y_canon"],
+                    sensor_xy=out_data["sensor_xy"],
+                    sim_id=bname, tag=args.tag,
+                    rel_l2=rel_l2, test_idx=int(test_idx),
+                    sel_label=s["label"],
+                    results_path=results_path,
+                    value_scale=args.value_scale,
+                    show_lower=args.show_lower)
+                print(f"  wrote {ic_out}", flush=True)
                 total_files += 1
 
     print(f"\nall {total_files} test-case figure(s) across "

@@ -39,5 +39,6 @@ subprocess.run([
     "--out", "viz/firehorse1_and_2_clean/all_picks/",
     "--pick", "worst,best,median,random",
     "--topn", "10",
-    "--layout", "snapshot,kymo,radial_anim",
+    "--layout", "snapshot,kymo,radial_anim,interactive_compare",
+    "--show-lower",
 ], check=True)
