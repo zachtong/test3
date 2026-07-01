@@ -44,14 +44,26 @@ def _lookup(cfg: dict, dotted: str):
     return v
 
 
-def _key(npz_dir, nx, ny, nt, x_end, y_end, drop_first_steps,
-         seed, train_frac, val_frac, n_fit) -> str:
-    """Mirror training/basis_cache.py::_key exactly. Any drift here
-    would silently break the diagnosis; keep this function 1:1 with
-    the source of truth."""
+def _key_raw(npz_dir, nx, ny, nt, x_end, y_end, drop_first_steps,
+             seed, train_frac, val_frac, n_fit) -> str:
+    """Mirror training/basis_cache.py::_key_raw exactly (legacy formula
+    used by pre-resolve() versions of the code)."""
     raw = (f"pod3d|{npz_dir}|{nx}|{ny}|{nt}|{x_end}|{y_end}|"
            f"{drop_first_steps}|{seed}|{train_frac}|{val_frac}|{n_fit}")
     return hashlib.sha256(raw.encode()).hexdigest()[:16]
+
+
+def _key(npz_dir, nx, ny, nt, x_end, y_end, drop_first_steps,
+         seed, train_frac, val_frac, n_fit) -> str:
+    """Mirror training/basis_cache.py::_key exactly. Resolves npz_dir
+    first for path normalization."""
+    try:
+        npz_dir = str(Path(str(npz_dir)).expanduser().resolve())
+    except (OSError, ValueError):
+        pass
+    return _key_raw(npz_dir, nx, ny, nt, x_end, y_end,
+                     drop_first_steps, seed, train_frac,
+                     val_frac, n_fit)
 
 
 def _npz_dir_variants(npz_dir: str) -> list:
@@ -158,15 +170,20 @@ def _probe_hash(target_hash: str, base_key_tuple, npz_dir_variants,
                   for _seed in seed_vs:
                    for _tf in tf_vs:
                     for _vf in vf_vs:
-                     k = _key(nd, _nx, _ny, _nt, _xe, _ye, _drop,
-                              _seed, _tf, _vf, n)
-                     if k == target_hash:
-                         return dict(npz_dir=nd, n_fit=n,
-                                       nx=_nx, ny=_ny, nt=_nt,
-                                       x_end=_xe, y_end=_ye,
-                                       drop_first_steps=_drop,
-                                       seed=_seed, train_frac=_tf,
-                                       val_frac=_vf)
+                     # Try both new (resolved) and legacy (raw) key
+                     # formulas so pre-fix files also get matched.
+                     for kfn, kfn_label in ((_key, "resolved"),
+                                             (_key_raw, "legacy")):
+                        k = kfn(nd, _nx, _ny, _nt, _xe, _ye, _drop,
+                                _seed, _tf, _vf, n)
+                        if k == target_hash:
+                            return dict(npz_dir=nd, n_fit=n,
+                                          nx=_nx, ny=_ny, nt=_nt,
+                                          x_end=_xe, y_end=_ye,
+                                          drop_first_steps=_drop,
+                                          seed=_seed, train_frac=_tf,
+                                          val_frac=_vf,
+                                          _key_formula=kfn_label)
     return None
 
 
@@ -302,7 +319,9 @@ def main() -> int:
                   f"drift is in a field the probe doesn't cover yet.",
                   flush=True)
             continue
-        print(f"  {f.name}: MATCH", flush=True)
+        formula = hit.pop("_key_formula", "resolved")
+        print(f"  {f.name}: MATCH via {formula}-key formula",
+              flush=True)
         for k, v in hit.items():
             if v != base_all.get(k):
                 bv = base_all.get(k)

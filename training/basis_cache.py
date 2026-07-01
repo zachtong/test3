@@ -26,21 +26,52 @@ import numpy as np
 from core.pod_basis import PODBasis
 
 
+def _key_raw(npz_dir, nx, ny, nt, x_end, y_end, drop_first_steps,
+             seed, train_frac, val_frac, n_fit) -> str:
+    """LEGACY key formula (kept for backward compatibility).
+
+    Same as _key but does NOT resolve npz_dir. Any pod3d_*.npz file
+    written by pre-normalize versions of the code lives under this
+    hash. load_or_fit_basis checks this as a fallback so an existing
+    cache does not become dead just because we changed the key
+    formula. Do not call this from new code; call _key which
+    normalizes npz_dir first."""
+    raw = (f"pod3d|{npz_dir}|{nx}|{ny}|{nt}|{x_end}|{y_end}|"
+           f"{drop_first_steps}|{seed}|{train_frac}|{val_frac}|{n_fit}")
+    return hashlib.sha256(raw.encode()).hexdigest()[:16]
+
+
 def _key(npz_dir, nx, ny, nt, x_end, y_end, drop_first_steps,
          seed, train_frac, val_frac, n_fit) -> str:
     """Stable short hash that identifies the data-split-grid context.
 
-    Every parameter that changes the contents of the (train + val) sims
-    must be in the raw string. Notably:
-      - npz_dir: the data folder
+    npz_dir is resolved to canonical absolute form FIRST so different
+    string spellings that map to the same physical directory (trailing
+    slash, symlink, ~, relative-vs-absolute) all produce the same hash.
+    This prevents a common source of cache MISS: training was run with
+    '--data.npz_dir /path/to/data/' (trailing slash) but viz_all with
+    '--npz-dir /path/to/data' (no slash), or one path via symlink and
+    the other via the target.
+
+    Every other parameter that changes the contents of the (train +
+    val) sims goes into the raw string as-is:
       - nx, ny, nt, x_end, y_end: canonical grid
       - drop_first_steps: loader trim, alters every sim's f
       - seed + train_frac + val_frac: which sims end up in (train + val)
       - n_fit: count of sims actually used (catches limit-changes)
+
+    Falls back to the raw string if resolve() fails (rare; only when
+    the path is invalid, which load_or_fit_basis would have already
+    caught during load_dataset).
     """
-    raw = (f"pod3d|{npz_dir}|{nx}|{ny}|{nt}|{x_end}|{y_end}|"
-           f"{drop_first_steps}|{seed}|{train_frac}|{val_frac}|{n_fit}")
-    return hashlib.sha256(raw.encode()).hexdigest()[:16]
+    try:
+        npz_dir_norm = str(
+            Path(str(npz_dir)).expanduser().resolve())
+    except (OSError, ValueError):
+        npz_dir_norm = str(npz_dir)
+    return _key_raw(npz_dir_norm, nx, ny, nt, x_end, y_end,
+                     drop_first_steps, seed, train_frac,
+                     val_frac, n_fit)
 
 
 def _make(Phi, sigma, spatial_shape) -> PODBasis:
@@ -85,22 +116,45 @@ def load_or_fit_basis(sims, K: int, *, npz_dir, nx, ny, nt,
                seed, train_frac, val_frac, n_fit)
     path = cache_dir / f"pod3d_{key}.npz"
 
-    if not force_refit and path.exists():
-        try:
-            with np.load(path, allow_pickle=False) as z:
-                if int(z["k_cache"]) >= K:
-                    print(f"  POD basis cache HIT: {path.name} "
-                          f"(k_cache={int(z['k_cache'])}, asked K={K})",
-                          flush=True)
-                    return _make(z["Phi"][:, :K], z["sigma"][:K],
-                                 z["spatial_shape"])
-                else:
-                    print(f"  POD basis cache stale: k_cache="
-                          f"{int(z['k_cache'])} < requested K={K}; "
-                          f"refitting at k_cache={k_cache}", flush=True)
-        except (OSError, KeyError, ValueError) as e:
-            print(f"  POD basis cache unreadable ({e}); refitting",
-                  flush=True)
+    # Build the list of paths to try, in preference order:
+    #   1. resolved-key path (the canonical location under the new
+    #      key formula that normalizes npz_dir)
+    #   2. legacy-key path (raw npz_dir; only present if a pre-fix
+    #      version wrote it, e.g. this user's existing pod3d files
+    #      from before Path.resolve() landed in _key). Skipped when
+    #      the raw string already resolves to the same value, since
+    #      then legacy_key == resolved_key and the file is the same.
+    candidates = [(path, "resolved-key")]
+    legacy_key = _key_raw(npz_dir, nx, ny, nt, x_end, y_end,
+                           drop_first_steps, seed, train_frac,
+                           val_frac, n_fit)
+    if legacy_key != key:
+        legacy_path = cache_dir / f"pod3d_{legacy_key}.npz"
+        candidates.append((legacy_path, "legacy-key"))
+
+    if not force_refit:
+        for cand_path, label in candidates:
+            if not cand_path.exists():
+                continue
+            try:
+                with np.load(cand_path, allow_pickle=False) as z:
+                    if int(z["k_cache"]) >= K:
+                        print(f"  POD basis cache HIT ({label}): "
+                              f"{cand_path.name} (k_cache="
+                              f"{int(z['k_cache'])}, asked K={K})",
+                              flush=True)
+                        return _make(z["Phi"][:, :K], z["sigma"][:K],
+                                     z["spatial_shape"])
+                    else:
+                        print(f"  POD basis cache stale ({label}): "
+                              f"k_cache={int(z['k_cache'])} < "
+                              f"requested K={K}; refitting at k_cache="
+                              f"{k_cache}", flush=True)
+                        break   # will refit; stop probing candidates
+            except (OSError, KeyError, ValueError) as e:
+                print(f"  POD basis cache unreadable ({label}: "
+                      f"{cand_path.name}, {e}); trying next",
+                      flush=True)
 
     # Diagnostic MISS logging: show the key tuple the caller resolved
     # and list any existing pod3d_*.npz that might have had a different
