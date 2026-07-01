@@ -90,22 +90,83 @@ def _npz_dir_variants(npz_dir: str) -> list:
     return out
 
 
+def _type_variants(v):
+    """Enumerate plausible str() representations of a JSON-parsed
+    numeric value. Training's _key does f-string interpolation which
+    calls str() on the raw type -- so int 1 -> '1' and float 1.0 ->
+    '1.0' produce different hashes. Emit both forms whenever the
+    value is numerically 1 or similar so the probe catches it."""
+    out = [v]
+    try:
+        f = float(v)
+        i = int(f)
+        # if the value is an integer, both int and float representations
+        if f == i:
+            if isinstance(v, int) and not isinstance(v, bool):
+                out.append(float(v))                       # int -> float
+            elif isinstance(v, float):
+                out.append(int(f))                          # float -> int
+        # else values like 0.8 vs 0.80 are the same via str(), skip
+    except (TypeError, ValueError):
+        pass
+    # dedupe preserving order
+    seen = set(); dd = []
+    for x in out:
+        k = (type(x).__name__, x)
+        if k not in seen:
+            seen.add(k); dd.append(x)
+    return dd
+
+
 def _probe_hash(target_hash: str, base_key_tuple, npz_dir_variants,
-                n_fit_deltas=(0, -1, +1, -2, +2)) -> tuple | None:
-    """Brute-force (npz_dir_variant, n_fit + delta) to find a tuple
-    that hashes to target_hash. Returns (npz_dir_variant, n_fit) or
-    None. Base tuple minus (npz_dir, n_fit)."""
+                n_fit_range=range(-50, 51)) -> tuple | None:
+    """Brute-force to find a tuple that hashes to target_hash.
+
+    Combines: every (npz_dir_variant) x (n_fit + delta) x
+    (int-vs-float type variant per numeric field). This still
+    finishes in <1 s at typical cache sizes (~ 5 * 100 * 2^6 = 32000
+    hashes), and covers the vast majority of real-world drifts:
+      - npz_dir string spelling
+      - n_fit off by a few (some sims added/removed since training)
+      - x_end / y_end / train_frac / val_frac stored as int vs float
+    """
     (nx, ny, nt, x_end, y_end, drop_first_steps,
      seed, train_frac, val_frac, base_n_fit) = base_key_tuple
+
+    # Type-vary the fields that could reasonably be int-vs-float
+    nx_vs = _type_variants(nx)
+    ny_vs = _type_variants(ny)
+    nt_vs = _type_variants(nt)
+    xe_vs = _type_variants(x_end)
+    ye_vs = _type_variants(y_end)
+    drop_vs = _type_variants(drop_first_steps)
+    seed_vs = _type_variants(seed)
+    tf_vs = _type_variants(train_frac)
+    vf_vs = _type_variants(val_frac)
+
     for nd in npz_dir_variants:
-        for dn in n_fit_deltas:
+        for dn in n_fit_range:
             n = base_n_fit + dn
             if n <= 0:
                 continue
-            k = _key(nd, nx, ny, nt, x_end, y_end, drop_first_steps,
-                     seed, train_frac, val_frac, n)
-            if k == target_hash:
-                return (nd, n)
+            for _nx in nx_vs:
+             for _ny in ny_vs:
+              for _nt in nt_vs:
+               for _xe in xe_vs:
+                for _ye in ye_vs:
+                 for _drop in drop_vs:
+                  for _seed in seed_vs:
+                   for _tf in tf_vs:
+                    for _vf in vf_vs:
+                     k = _key(nd, _nx, _ny, _nt, _xe, _ye, _drop,
+                              _seed, _tf, _vf, n)
+                     if k == target_hash:
+                         return dict(npz_dir=nd, n_fit=n,
+                                       nx=_nx, ny=_ny, nt=_nt,
+                                       x_end=_xe, y_end=_ye,
+                                       drop_first_steps=_drop,
+                                       seed=_seed, train_frac=_tf,
+                                       val_frac=_vf)
     return None
 
 
@@ -141,36 +202,47 @@ def main() -> int:
     n_train = r.get("n_train_sims") or r.get("split", {}).get("n_train")
     n_val = r.get("n_val_sims") or r.get("split", {}).get("n_val")
     if n_train is None or n_val is None:
-        # Fall back: per_sim_basenames is n_test; total is unknown from
-        # results.json alone. Ask the user.
+        # Fall back: results.json didn't record split sizes explicitly.
+        # split_dataset() uses:
+        #   n_train_total = int(N * train_frac)
+        #   n_val = int(n_train_total * val_frac)   (val CARVED FROM train)
+        #   n_test = N - n_train_total
+        # So load_or_fit_basis's sims = train + val = n_train_total,
+        # and test_frac = 1 - train_frac (NOT 1 - train_frac - val_frac).
         n_test = len(r.get("per_sim_basenames", []))
         tf = float(key_elements["data.train_frac"])
-        vf = float(key_elements["train.val_frac"])
-        # test_frac = 1 - tf - vf ; so total = n_test / test_frac
-        test_frac = 1.0 - tf - vf
+        test_frac = 1.0 - tf
         if test_frac <= 0:
-            print("cannot recover n_fit; test_frac <= 0", file=sys.stderr)
+            print("cannot recover n_fit; test_frac <= 0",
+                  file=sys.stderr)
             return 2
+        # int() truncation of int(N * train_frac) means several N values
+        # give the same n_test. Estimate N; the probe widens n_fit anyway.
         n_total_est = int(round(n_test / test_frac))
-        n_fit_est = int(round(n_total_est * (tf + vf)))
+        n_fit_est = int(n_total_est * tf)
         print(f"note: results.json did not store split sizes; "
               f"estimating n_fit ~= {n_fit_est} from n_test="
-              f"{n_test} / test_frac={test_frac:.3f}",
+              f"{n_test} / (1 - train_frac)={test_frac:.3f}",
               flush=True)
         n_fit_from_json = n_fit_est
     else:
+        # split_dataset: n_val is INSIDE n_train_total. Reading
+        # n_train_sims / n_val_sims recorded separately, load_or_fit_basis
+        # was called with sims = train + val = n_train_total = n_train + n_val.
         n_fit_from_json = int(n_train) + int(n_val)
 
-    # Compute training's expected hash
-    nx = int(key_elements["data.nx"])
-    ny = int(key_elements["data.ny"])
-    nt = int(key_elements["data.nt"])
-    x_end = float(key_elements["data.x_end"])
-    y_end = float(key_elements["data.y_end"])
-    drop = int(key_elements["data.drop_first_steps"])
-    seed = int(key_elements["data.seed"])
-    tf = float(key_elements["data.train_frac"])
-    vf = float(key_elements["train.val_frac"])
+    # Compute training's expected hash using the RAW json-parsed types
+    # (do not eagerly convert; f"{int} " and f"{float}" produce different
+    # strings and the probe needs to see both). npz_dir stays str.
+    nx = key_elements["data.nx"]
+    ny = key_elements["data.ny"]
+    nt = key_elements["data.nt"]
+    x_end = key_elements["data.x_end"]
+    y_end = key_elements["data.y_end"]
+    drop = key_elements["data.drop_first_steps"]
+    seed = key_elements["data.seed"]
+    tf = key_elements["data.train_frac"]
+    vf = key_elements["train.val_frac"]
     npz_dir = str(key_elements["data.npz_dir"])
     training_hash = _key(npz_dir, nx, ny, nt, x_end, y_end, drop,
                           seed, tf, vf, n_fit_from_json)
@@ -214,28 +286,31 @@ def main() -> int:
     base_key = (nx, ny, nt, x_end, y_end, drop, seed, tf, vf,
                 n_fit_from_json)
     variants = _npz_dir_variants(npz_dir)
+    base_all = {"npz_dir": npz_dir, "n_fit": n_fit_from_json,
+                 "nx": nx, "ny": ny, "nt": nt,
+                 "x_end": x_end, "y_end": y_end,
+                 "drop_first_steps": drop, "seed": seed,
+                 "train_frac": tf, "val_frac": vf}
     for f in mystery:
         target = f.stem.replace("pod3d_", "")
         hit = _probe_hash(target, base_key, variants)
         if hit is None:
             print(f"  {f.name}: NO MATCH with tested variants. "
                   f"The differing field is likely OUTSIDE (npz_dir, "
-                  f"n_fit +- 2). Manually check config for e.g. "
-                  f"data.x_end / data.y_end / data.drop_first_steps "
-                  f"if they were re-parsed as different types "
-                  f"(float 1.0 vs int 1) between train and viz.",
+                  f"n_fit +- 50, int/float type variants). Send the "
+                  f"whole training config to a maintainer -- the "
+                  f"drift is in a field the probe doesn't cover yet.",
                   flush=True)
             continue
-        used_dir, used_n_fit = hit
         print(f"  {f.name}: MATCH", flush=True)
-        if used_dir != npz_dir:
-            print(f"    npz_dir differs:")
-            print(f"      training:  {npz_dir!r}")
-            print(f"      viz-time:  {used_dir!r}", flush=True)
-        if used_n_fit != n_fit_from_json:
-            print(f"    n_fit differs: training={n_fit_from_json}, "
-                  f"viz-time={used_n_fit} (delta "
-                  f"{used_n_fit - n_fit_from_json:+d})", flush=True)
+        for k, v in hit.items():
+            if v != base_all.get(k):
+                bv = base_all.get(k)
+                print(f"    {k} differs:", flush=True)
+                print(f"      training:  {bv!r}  "
+                      f"(type={type(bv).__name__})")
+                print(f"      viz-time:  {v!r}  "
+                      f"(type={type(v).__name__})", flush=True)
 
     print(f"\nfix: pass the SAME npz_dir string to viz_all as was in "
           f"training (see 'training:' line above). Or use "
