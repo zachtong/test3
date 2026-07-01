@@ -120,13 +120,13 @@ def test_bonded_mask_rule_3_monotonic_in_time():
     assert (diff >= 0).all(), "bonded mask should never retreat in time"
 
 
-def test_worst_cache_roundtrip(tmp_path):
-    """Worst-cases cache: write then read must be faithful across all
+def test_test_cache_roundtrip(tmp_path):
+    """Test-cases cache: write then read must be faithful across all
     fields (idx, K, w_pred, w_true, a_pred, a_true, basenames). Guards
     against schema drift where the reader forgets a field the writer
-    stored -- silently under-reporting the top-N."""
-    from scripts.viz_worst_cases import (
-        _save_worst_cache, _load_worst_cache, _worst_cache_path)
+    stored -- silently under-reporting the selected sims."""
+    from scripts.viz_test_cases import (
+        _save_test_cache, _load_test_cache, _test_cache_path)
 
     tag_dir = tmp_path / "outputs" / "sometag"
     tag_dir.mkdir(parents=True)
@@ -145,37 +145,35 @@ def test_worst_cache_roundtrip(tmp_path):
         basenames=["sim_a.npz", "sim_b.npz", "sim_c.npz",
                     "sim_d.npz", "sim_e.npz"])
 
-    path = _worst_cache_path(str(tmp_path / "outputs"),
-                              "sometag", 5, "deadbeef1234")
-    _save_worst_cache(path, payload)
-    hit = _load_worst_cache(path)
+    path = _test_cache_path(str(tmp_path / "outputs"),
+                              "sometag", "deadbeef1234", "aa112233")
+    _save_test_cache(path, payload)
+    hit = _load_test_cache(path)
     assert hit is not None
     assert hit["K"] == 3
     assert list(hit["idx"]) == [7, 12, 3, 99, 5]
     assert hit["basenames"] == payload["basenames"]
-    # float32 round-trip tolerance
     for k in ("w_pred", "w_true", "a_pred", "a_true"):
         assert np.allclose(hit[k], payload[k], atol=1e-9), \
             f"{k} did not roundtrip"
     assert np.array_equal(hit["sensor_xy"], payload["sensor_xy"])
 
 
-def test_worst_cache_path_encodes_topn_and_fingerprint(tmp_path):
-    """Different topn OR different checkpoint fingerprint must yield
-    a different cache file so a retrain does not clobber the pre-
-    retrain cache, and topn=5 vs topn=10 do not collide."""
-    from scripts.viz_worst_cases import _worst_cache_path
-    base = _worst_cache_path(str(tmp_path), "tag", 5, "aaaaaaaa")
-    assert base != _worst_cache_path(str(tmp_path), "tag", 10, "aaaaaaaa")
-    assert base != _worst_cache_path(str(tmp_path), "tag", 5, "bbbbbbbb")
-    # Same key -> same path (idempotence).
-    assert base == _worst_cache_path(str(tmp_path), "tag", 5, "aaaaaaaa")
+def test_test_cache_path_encodes_selection_and_fingerprint(tmp_path):
+    """Different (sel_key, ckpt_fp) tuples must yield distinct cache
+    paths so pick=worst / best / median / random / sim-list all
+    coexist under the same tag without clobbering each other."""
+    from scripts.viz_test_cases import _test_cache_path
+    base = _test_cache_path(str(tmp_path), "tag", "aaaaaaaa", "sel1")
+    assert base != _test_cache_path(str(tmp_path), "tag", "bbbbbbbb", "sel1")
+    assert base != _test_cache_path(str(tmp_path), "tag", "aaaaaaaa", "sel2")
+    assert base == _test_cache_path(str(tmp_path), "tag", "aaaaaaaa", "sel1")
 
 
-def test_worst_cache_rejects_stale_version(tmp_path):
-    from scripts.viz_worst_cases import (_load_worst_cache,
-                                            _worst_cache_path)
-    path = _worst_cache_path(str(tmp_path), "tag", 5, "aa")
+def test_test_cache_rejects_stale_version(tmp_path):
+    from scripts.viz_test_cases import (_load_test_cache,
+                                            _test_cache_path)
+    path = _test_cache_path(str(tmp_path), "tag", "aa", "sel")
     path.parent.mkdir(parents=True, exist_ok=True)
     np.savez(path, version=np.int32(-999),
              x_canon=np.zeros(4), y_canon=np.zeros(4),
@@ -186,7 +184,53 @@ def test_worst_cache_rejects_stale_version(tmp_path):
              a_pred=np.zeros((1, 1, 2), dtype=np.float32),
              a_true=np.zeros((1, 1, 2), dtype=np.float32),
              basenames_json=np.array('["sim_a.npz"]'))
-    assert _load_worst_cache(path) is None
+    assert _load_test_cache(path) is None
+
+
+def test_pick_indices_covers_all_modes():
+    """_pick_indices must return the expected slice for each mode.
+
+    Uses a rigged error vector where the ranking is unambiguous so
+    every mode's contract is checkable without stat wobble."""
+    from scripts.viz_test_cases import _pick_indices
+    errs = np.array([0.10, 0.20, 0.05, 0.90, 0.40, 0.30, 0.60, 0.15,
+                      0.70, 0.50])
+    # worst: 3 largest, descending -> idx [3, 8, 6]  (0.90, 0.70, 0.60)
+    assert list(_pick_indices(errs, "worst", 3, 0)) == [3, 8, 6]
+    # best: 3 smallest, ascending -> idx [2, 0, 7]  (0.05, 0.10, 0.15)
+    assert list(_pick_indices(errs, "best", 3, 0)) == [2, 0, 7]
+    # median: 3 centered around the middle of sorted order
+    med = _pick_indices(errs, "median", 3, 0)
+    med_vals = np.sort(errs[med])
+    # The middle of a sorted [0.05, 0.10, 0.15, 0.20, 0.30, 0.40, 0.50,
+    # 0.60, 0.70, 0.90] is at rank 5 (0.40); a 3-window around rank 5
+    # picks ranks 4/5/6 = 0.30 / 0.40 / 0.50.
+    assert np.allclose(med_vals, [0.30, 0.40, 0.50]), med_vals
+    # random: deterministic given seed
+    r0 = _pick_indices(errs, "random", 4, 0)
+    r0_again = _pick_indices(errs, "random", 4, 0)
+    r1 = _pick_indices(errs, "random", 4, 1)
+    assert list(r0) == list(r0_again)
+    assert list(r0) != list(r1)
+    assert len(set(r0.tolist())) == 4        # unique
+
+
+def test_selection_key_stable_under_reorder():
+    """--sim ['a', 'b'] and --sim ['b', 'a'] must produce the SAME
+    cache key -- the user should not have to remember an order."""
+    from scripts.viz_test_cases import _selection_key
+    k1 = _selection_key(None, None, None, ["b.npz", "a.npz"])
+    k2 = _selection_key(None, None, None, ["a.npz", "b.npz"])
+    assert k1 == k2
+    # Pick+topn+seed vs sim list must give different keys.
+    k_pick = _selection_key("worst", 5, None, None)
+    assert k_pick != k1
+    # Different picks must give different keys.
+    assert _selection_key("worst", 5, None, None) != _selection_key(
+        "best", 5, None, None)
+    # random seed matters when pick=random.
+    assert _selection_key("random", 5, 0, None) != _selection_key(
+        "random", 5, 1, None)
 
 
 def test_diversity_stats_cache_roundtrip(tmp_path):

@@ -1,6 +1,6 @@
-"""Visualize the top-N worst test sims for failure-mode triage.
+"""Visualize test-set predictions vs GT for selected sims.
 
-Per worst sim: one PNG containing
+Per selected sim: one PNG containing
   TOP ROW (3 full-disk heatmaps at t*):
     - GT field
     - Model-predicted field
@@ -13,20 +13,47 @@ Per worst sim: one PNG containing
 t* is the time index where |GT - prediction| peaks; this is the most
 informative single snapshot to render. Files are named with the
 per-sim rel-L2 + sim basename so they sort naturally:
-  worst_<rel_l2>__<sim_basename>.png
+  <slot>_relL2<rel_l2>_<sim_basename>.png
+
+FOUR SELECTION MODES (mutually exclusive):
+
+  --pick worst        top-N by descending field error (default)
+  --pick best         top-N by ascending field error
+  --pick median       N centered around the median field error
+  --pick random       N random test sims (deterministic --seed)
+  --sim BASENAME[,BASENAME,...]
+                      specific basenames; overrides --pick and --topn
 
 FIRST RUN is heavyweight: load dataset (93 GB), rebuild split, load
 basis, load 3 seed checkpoints, run inference. Cost ~1-2 minutes
 after loader cache warm, ~5-30 minutes cold.
 
-RE-RUNS ARE FAST via the worst-cases cache: a hit reads pre-computed
-(w_pred, w_true, a_pred, a_true) tensors for the top-N sims from
-outputs/<tag>/_worst_top<N>_<ckpt_hash>.npz (~100 MB) and renders in
-seconds. The cache key includes the sha of the seed checkpoint files
-so retraining auto-invalidates.
+RE-RUNS ARE FAST via the test-cases cache: a hit reads pre-computed
+(w_pred, w_true, a_pred, a_true) tensors for the selected sims from
+outputs/<tag>/_test_<pick_key>_<ckpt_hash>.npz (~100 MB) and renders
+in seconds. Cache key includes pick mode + seed + basename set +
+checkpoint fingerprint; different picks / seeds coexist as separate
+cache files under the same tag.
 
-    python scripts/viz_worst_cases.py --tag firehorse2_n3_full \\
+    # backward-compatible default: top-5 worst
+    python scripts/viz_test_cases.py --tag firehorse2_n3_full \\
         --topn 5 --out viz/worst/
+
+    # top-5 best -- see how the model does when it does well
+    python scripts/viz_test_cases.py --tag firehorse2_n3_full \\
+        --pick best --topn 5 --out viz/best/
+
+    # 3 typical sims around the median error
+    python scripts/viz_test_cases.py --tag firehorse2_n3_full \\
+        --pick median --topn 3 --out viz/median/
+
+    # 5 random test sims (seed 0)
+    python scripts/viz_test_cases.py --tag firehorse2_n3_full \\
+        --pick random --topn 5 --seed 0 --out viz/random/
+
+    # one specific sim by basename
+    python scripts/viz_test_cases.py --tag firehorse2_n3_full \\
+        --sim run_00473.npz --out viz/that_one/
 """
 
 from __future__ import annotations
@@ -48,8 +75,9 @@ from scripts.fieldviz import (render_full_disk, provenance_footer,  # noqa: E402
                                wafer_value_range)
 
 
-_WORST_CACHE_PREFIX = "_worst_top"
-_WORST_CACHE_VERSION = 1
+_TEST_CACHE_PREFIX = "_test_"
+_TEST_CACHE_VERSION = 2   # v2 = new schema with pick/seed/sim key
+_VALID_PICKS = ("worst", "best", "median", "random")
 
 
 def _checkpoint_fingerprint(output_dir: str, tag: str,
@@ -70,19 +98,32 @@ def _checkpoint_fingerprint(output_dir: str, tag: str,
     return hashlib.sha256("|".join(parts).encode()).hexdigest()[:12]
 
 
-def _worst_cache_path(output_dir: str, tag: str, topn: int,
-                     ckpt_fp: str) -> Path:
+def _selection_key(pick: str | None, topn: int | None,
+                    seed: int | None,
+                    sim_basenames: list | None) -> str:
+    """8-char hash of the selection specification. --sim takes
+    precedence; otherwise pick/topn/seed determine the key."""
+    if sim_basenames:
+        payload = {"sims": sorted(sim_basenames)}
+    else:
+        payload = {"pick": pick, "topn": topn, "seed": seed}
+    return hashlib.sha256(
+        json.dumps(payload, sort_keys=True).encode()).hexdigest()[:8]
+
+
+def _test_cache_path(output_dir: str, tag: str, ckpt_fp: str,
+                     sel_key: str) -> Path:
     return (Path(output_dir) / tag /
-            f"{_WORST_CACHE_PREFIX}{topn}_{ckpt_fp}.npz")
+            f"{_TEST_CACHE_PREFIX}{sel_key}_{ckpt_fp}.npz")
 
 
-def _load_worst_cache(path: Path):
+def _load_test_cache(path: Path):
     """Return a predict_run_fields-shaped dict on hit, None on miss."""
     if not path.is_file():
         return None
     try:
         with np.load(path, allow_pickle=False) as d:
-            if int(d.get("version", -1)) != _WORST_CACHE_VERSION:
+            if int(d.get("version", -1)) != _TEST_CACHE_VERSION:
                 return None
             return dict(
                 x_canon=d["x_canon"], y_canon=d["y_canon"],
@@ -95,20 +136,20 @@ def _load_worst_cache(path: Path):
                 a_true=d["a_true"].astype(np.float64),
                 basenames=json.loads(str(d["basenames_json"])))
     except (OSError, ValueError, KeyError) as e:
-        print(f"  worst cache read failed "
+        print(f"  test-cases cache read failed "
               f"({type(e).__name__}: {e}) -- rebuilding",
               flush=True)
         return None
 
 
-def _save_worst_cache(path: Path, payload: dict) -> None:
+def _save_test_cache(path: Path, payload: dict) -> None:
     """Atomic write. Fields stored float32 to keep the file ~100 MB
     for topn=5 on 128x128x300; loader auto-promotes to float64."""
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(".tmp.npz")
     np.savez(
         tmp,
-        version=np.int32(_WORST_CACHE_VERSION),
+        version=np.int32(_TEST_CACHE_VERSION),
         x_canon=payload["x_canon"].astype(np.float64),
         y_canon=payload["y_canon"].astype(np.float64),
         t=payload["t"].astype(np.float64),
@@ -123,12 +164,77 @@ def _save_worst_cache(path: Path, payload: dict) -> None:
     tmp.replace(path)
 
 
+def _pick_indices(field_errs: np.ndarray, pick: str, topn: int,
+                   seed: int) -> np.ndarray:
+    """Return an array of test_idx per the --pick strategy.
+
+    'worst'  -- topn largest errors, descending
+    'best'   -- topn smallest errors, ascending
+    'median' -- topn centered around the median position, sorted
+                by error ascending
+    'random' -- topn drawn uniformly at random (rng seeded)
+    """
+    n = field_errs.size
+    topn = int(min(topn, n))
+    if pick == "worst":
+        return np.argsort(field_errs)[-topn:][::-1]
+    if pick == "best":
+        return np.argsort(field_errs)[:topn]
+    if pick == "median":
+        order = np.argsort(field_errs)
+        centre = n // 2
+        half = topn // 2
+        lo = max(0, centre - half)
+        hi = min(n, lo + topn)
+        if hi - lo < topn:
+            lo = max(0, hi - topn)
+        return order[lo:hi]
+    if pick == "random":
+        rng = np.random.default_rng(seed)
+        return np.sort(rng.choice(n, size=topn, replace=False))
+    raise ValueError(f"unknown --pick {pick!r}, valid: {_VALID_PICKS}")
+
+
+def _resolve_sim_basenames(basenames_list: list, wanted: list
+                            ) -> tuple[np.ndarray, list]:
+    """Map a comma list of user-supplied basenames to test-split
+    indices. Unknown basenames go to a warning and are dropped."""
+    idx_by_name = {name: i for i, name in enumerate(basenames_list)}
+    hits, misses = [], []
+    for w in wanted:
+        if w in idx_by_name:
+            hits.append(idx_by_name[w])
+        else:
+            misses.append(w)
+    if misses:
+        print(f"WARN: {len(misses)} basename(s) not in test split, "
+              f"skipping: {misses[:5]}{'...' if len(misses) > 5 else ''}",
+              file=sys.stderr)
+    if not hits:
+        raise SystemExit(
+            "--sim gave 0 basenames in the test split; nothing to render")
+    return np.asarray(hits, dtype=int), [basenames_list[i] for i in hits]
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--tag", required=True,
                     help="training run tag (i.e. outputs/<tag>/...)")
     ap.add_argument("--topn", type=int, default=5,
-                    help="number of worst sims to render")
+                    help="number of sims to render for --pick modes; "
+                    "ignored when --sim is used")
+    ap.add_argument("--pick", choices=_VALID_PICKS, default="worst",
+                    help="selection strategy: worst / best / median / "
+                    "random (default: worst, matches the legacy "
+                    "viz_worst_cases behavior)")
+    ap.add_argument("--sim", default=None,
+                    help="comma list of specific sim basenames to "
+                    "render (overrides --pick and --topn). Basenames "
+                    "not in the test split emit a warning and are "
+                    "skipped.")
+    ap.add_argument("--seed", type=int, default=0,
+                    help="rng seed for --pick random (default 0 so "
+                    "re-runs are stable)")
     ap.add_argument("--out", required=True,
                     help="output directory (one PNG per sim)")
     ap.add_argument("--output-dir", default="outputs",
@@ -138,15 +244,15 @@ def main() -> int:
                     "a different machine than training)")
     ap.add_argument("--value-scale", type=float, default=1.0e6)
     ap.add_argument("--no-cache", action="store_true",
-                    help="ignore the worst-cases prediction cache and "
+                    help="ignore the test-cases prediction cache and "
                     "re-run predict_run_fields (93 GB load + inference). "
                     "Use if you suspect the cache is stale.")
     ap.add_argument("--force", action="store_true",
-                    help="rebuild AND overwrite the worst-cases cache "
+                    help="rebuild AND overwrite the test-cases cache "
                     "even on a valid hit. Implies --no-cache.")
     args = ap.parse_args()
 
-    # Locate per-sim errors via results.json and pick top-N worst by rel-L2.
+    # Locate per-sim errors via results.json.
     results_path = (Path(args.output_dir) / args.tag /
                     "results.json").expanduser().resolve()
     if not results_path.is_file():
@@ -161,18 +267,26 @@ def main() -> int:
               "per_sim_basenames. Re-run training with the new scorer.py.",
               file=sys.stderr)
         return 1
-    # Worst-N indices INTO the test split.
-    worst_indices = np.argsort(field_errs)[-args.topn:][::-1]
-    print(f"top-{args.topn} worst test sims by rel-L2:")
-    for j in worst_indices:
+
+    # Resolve selection: --sim wins, else --pick.
+    sim_list = None
+    if args.sim:
+        sim_list = [s.strip() for s in args.sim.split(",") if s.strip()]
+        picked_indices, picked_names = _resolve_sim_basenames(
+            basenames, sim_list)
+        label = f"--sim ({len(sim_list)} names, {len(picked_indices)} hit)"
+    else:
+        picked_indices = _pick_indices(field_errs, args.pick,
+                                        args.topn, args.seed)
+        picked_names = [basenames[i] for i in picked_indices]
+        label = (f"--pick {args.pick} --topn {args.topn}"
+                 + (f" --seed {args.seed}" if args.pick == "random" else ""))
+    print(f"selection: {label}  ({len(picked_indices)} sim(s) to render):")
+    for j in picked_indices:
         print(f"  test_idx={int(j):4d}  rel_l2={field_errs[j]:.4f}  "
               f"{basenames[j]}")
 
-    # Try the worst-cases cache first. Its key includes the checkpoint
-    # fingerprint (size + mtime of each seed's .pt file) so a retrain
-    # automatically invalidates. If topn changes, the file NAME
-    # changes (different suffix), so both caches can coexist for
-    # different N values.
+    # Cache key encodes (pick, topn, seed) OR --sim basenames.
     from evaluation.run_predict import predict_run_fields, load_run_config
     overrides = {}
     if args.data_dir_override:
@@ -181,32 +295,38 @@ def main() -> int:
                           overrides=overrides)
     ckpt_fp = _checkpoint_fingerprint(args.output_dir, args.tag,
                                         list(cfg.seeds))
-    cache_path = _worst_cache_path(args.output_dir, args.tag,
-                                    args.topn, ckpt_fp)
+    sel_key = _selection_key(
+        args.pick if not sim_list else None,
+        args.topn if not sim_list else None,
+        args.seed if (not sim_list and args.pick == "random") else None,
+        picked_names if sim_list else None)
+    cache_path = _test_cache_path(args.output_dir, args.tag,
+                                    ckpt_fp, sel_key)
     out = (None if (args.no_cache or args.force)
-           else _load_worst_cache(cache_path))
+           else _load_test_cache(cache_path))
     if out is not None:
-        print(f"worst-cases cache HIT -> {cache_path.name}  "
-              f"(topn={args.topn}, K={out['K']})", flush=True)
+        print(f"test-cases cache HIT -> {cache_path.name}  "
+              f"({len(out['idx'])} sim(s), K={out['K']})", flush=True)
     else:
         if cache_path.exists() and args.no_cache:
             print(f"  --no-cache: skipping {cache_path.name}",
                   flush=True)
-        print(f"worst-cases cache MISS -> running predict_run_fields "
+        print(f"test-cases cache MISS -> running predict_run_fields "
               f"(93 GB load + inference)", flush=True)
         t0 = time.time()
-        out = predict_run_fields(args.tag, idx=worst_indices.tolist(),
+        out = predict_run_fields(args.tag,
+                                  idx=picked_indices.tolist(),
                                   output_dir=args.output_dir,
                                   overrides=overrides, verbose=True)
         print(f"  predict_run_fields done in "
               f"{time.time() - t0:.1f}s", flush=True)
         try:
-            _save_worst_cache(cache_path, out)
-            print(f"  wrote worst-cases cache -> {cache_path.name} "
+            _save_test_cache(cache_path, out)
+            print(f"  wrote test-cases cache -> {cache_path.name} "
                   f"(~{(cache_path.stat().st_size >> 20)} MB)",
                   flush=True)
         except OSError as e:
-            print(f"  WARN: could not write worst-cases cache "
+            print(f"  WARN: could not write test-cases cache "
                   f"({type(e).__name__}: {e}); continuing anyway",
                   flush=True)
     x_canon = out["x_canon"]; y_canon = out["y_canon"]
@@ -284,17 +404,18 @@ def main() -> int:
             axes[1, c].set_visible(False)
 
         fig.suptitle(
-            f"{args.tag}  |  test_idx={int(test_idx)}  |  "
-            f"rel-L2={rel_l2:.4f}  |  {bname}", fontsize=12)
+            f"{args.tag}  |  {label}  |  test_idx={int(test_idx)}  |  "
+            f"rel-L2={rel_l2:.4f}  |  {bname}", fontsize=11)
         provenance_footer(fig, sim_id=bname, tag=args.tag,
                           results_file=results_path,
                           extras={"test_idx": int(test_idx),
                                   "rel_l2": f"{rel_l2:.4f}",
-                                  "t_star": t_star})
+                                  "t_star": t_star,
+                                  "sel": (label.split()[0])})
 
-        # Filename: 0001_relL20.0823_<basename>.png so ls sorts by
-        # worst-first; the 4-digit slot prefix avoids ties when two
-        # sims share a basename root.
+        # Filename: <slot>_relL2<val>_<basename>.png so ls sorts by
+        # slot; the 4-digit slot prefix avoids ties when two sims
+        # share a basename root.
         stem = Path(bname).stem if bname else f"test{int(test_idx)}"
         fname = f"{slot:04d}_relL2{rel_l2:.4f}_{stem}.png"
         outp = out_dir / fname
@@ -302,7 +423,7 @@ def main() -> int:
         plt.close(fig)
         print(f"  wrote {outp}", flush=True)
 
-    print(f"\nall {len(out['idx'])} worst-case figures -> {out_dir}",
+    print(f"\nall {len(out['idx'])} test-case figure(s) -> {out_dir}",
           flush=True)
     return 0
 

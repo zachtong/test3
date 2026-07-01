@@ -160,22 +160,28 @@ training prints it when fitting.
 
 | Goal | Command | Output |
 |---|---|---|
-| Render top-N worst test sims (GT vs pred vs error + a_k(t) curves) | `python scripts/viz_worst_cases.py --tag <tag> --topn 5 --out viz/worst/` | PNG per sim |
+| Render top-N worst test sims (GT vs pred vs error + a_k(t) curves) | `python scripts/viz_test_cases.py --tag <tag> --pick worst --topn 5 --out viz/worst/` | PNG per sim |
+| Top-N best (see model at its best) | `... --pick best --topn 5 --out viz/best/` | PNG per sim |
+| N typical sims near median error | `... --pick median --topn 3 --out viz/typical/` | PNG per sim |
+| N random test sims (deterministic seed) | `... --pick random --topn 5 --seed 0 --out viz/random/` | PNG per sim |
+| One specific sim by basename | `--sim run_00473.npz --out viz/that_one/` | PNG per sim |
 | Run on a different machine (override data path) | `... --data-dir-override /elsewhere/3d_npz` | same |
-| Force worst-cases cache rebuild (rare) | `... --force` | rebuild + overwrite |
+| Force test-cases cache rebuild (rare) | `... --force` | rebuild + overwrite |
 | Bypass cache once (no overwrite) | `... --no-cache` | one-shot |
 
 First run: heavyweight. Loads dataset (93 GB), rebuilds split, loads
 basis, loads 3 seed checkpoints, runs inference. ~1-2 min after
 loader cache warm, 5-30 min cold. Then writes
-`outputs/<tag>/_worst_top<N>_<ckpt_hash>.npz` (~100 MB) holding
+`outputs/<tag>/_test_<sel_key>_<ckpt_hash>.npz` (~100 MB) holding
 (w_pred, w_true, a_pred, a_true, x_canon, y_canon, basenames, idx).
 
 Re-runs: cache HIT reads the 100 MB and renders in seconds. Cache key
-is (tag, topn, checkpoint fingerprint), so retraining auto-
-invalidates and different topn values coexist as separate cache files
-under the same tag directory. From `viz_all` use
-`--rebuild-worst-cache` to force rebuild.
+is (tag, selection, checkpoint fingerprint) where selection encodes
+either (pick, topn, seed) OR the sorted set of `--sim` basenames.
+Different selections coexist as separate cache files under the same
+tag; retraining auto-invalidates via the checkpoint fingerprint.
+`viz_all` still uses `--pick worst`; use `--rebuild-worst-cache` to
+force rebuild that specific cache file.
 
 ---
 

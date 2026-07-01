@@ -512,8 +512,9 @@ def main() -> int:
                         f"{len(existing)} files already; --force to redo"))
         else:
             worst_dir.mkdir(parents=True, exist_ok=True)
-            cmd = [py, str(_root / "scripts" / "viz_worst_cases.py"),
+            cmd = [py, str(_root / "scripts" / "viz_test_cases.py"),
                    "--tag", args.tag,
+                   "--pick", "worst",
                    "--topn", str(args.topn_worst),
                    "--out", str(worst_dir),
                    "--output-dir", args.output_dir]
