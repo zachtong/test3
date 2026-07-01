@@ -71,8 +71,18 @@ from scripts.fieldviz import (provenance_footer,                # noqa: E402
 # Thresholds. WARN = suspicious; FAIL = definitely a data problem
 # (retraining on this sim would learn artifact).
 _TREAL_BACKWARD_WARN = 1     # any raw backward is worth noting
-_TEMPORAL_RISE_WARN = 1e-9   # metres; float32 noise floor
-_TEMPORAL_RISE_FAIL = 1e-7   # metres; ~0.1 micrometre, well above noise
+# Rise is measured as a fraction of the sim's own peak descent, not
+# an absolute metres value -- otherwise sims with 15 um descent get
+# scored the same as sims with 150 um descent for the same absolute
+# rise. FAIL = rise > 5% of peak descent (clearly artifactual);
+# WARN = rise > 0.5% (noticeable but might be numerical noise).
+_TEMPORAL_RISE_REL_WARN = 0.005
+_TEMPORAL_RISE_REL_FAIL = 0.05
+# _RISE_COUNT_THRESHOLD is what we use for n_cells_with_rise (a per-
+# cell counter). Set to 1% of peak descent -- below this it is float32
+# noise, not signal. Kept relative to the sim so all sims agree on
+# what counts as 'has rise'.
+_RISE_COUNT_REL_THRESHOLD = 0.01
 _KINK_REL_WARN = 0.30        # 30% relative jump at edge
 _KINK_REL_FAIL = 0.60        # 60% = a clear discontinuity
 _DEAD_CELL_WARN = 0.02       # 2% of in-disk cells with all-zero traces
@@ -100,18 +110,43 @@ def _raw_treal_stats(npz_path: Path) -> dict:
 
 
 def _temporal_monotonicity(f: np.ndarray, in_disk: np.ndarray) -> dict:
-    """Largest positive diff along t at any in-disk cell."""
+    """Rise stats along t at every in-disk cell.
+
+    Returns:
+      max_rise       largest positive du_z at any in-disk cell / t
+      p99_rise       99th percentile of per-cell max rise; robust to
+                     a single outlier and shows what the 'typical bad
+                     cell' looks like
+      median_rise    the median per-cell max rise (numerical-noise
+                     baseline; anything WAY above this is signal)
+      n_cells_with_rise / frac_cells_with_rise
+                     count of cells whose max rise exceeds 1% of
+                     peak descent (relative-signal cells, not noise)
+      peak_descent   sim's most-negative u_z (abs value); the
+                     natural scale for reading rise magnitudes
+      max_rise_rel   max_rise / peak_descent  (0 = no rise;
+                     0.05 = rise is 5% of descent -- FAIL)
+    """
     diff = np.diff(f, axis=-1)                # (Nx, Ny, Nt-1)
     diff_in_disk = diff[in_disk]              # (M, Nt-1)
-    if diff_in_disk.size == 0:
-        return dict(max_rise=0.0, n_cells_with_rise=0,
-                     frac_cells_with_rise=0.0)
-    max_rise = float(diff_in_disk.max())
+    peak_descent = float(np.abs(np.minimum(f[in_disk], 0.0)).max())
+    if diff_in_disk.size == 0 or peak_descent == 0:
+        return dict(max_rise=0.0, p99_rise=0.0, median_rise=0.0,
+                     n_cells_with_rise=0, frac_cells_with_rise=0.0,
+                     peak_descent=peak_descent, max_rise_rel=0.0)
     per_cell_max = diff_in_disk.max(axis=-1)
-    n_bad = int((per_cell_max > _TEMPORAL_RISE_WARN).sum())
-    return dict(max_rise=max_rise, n_cells_with_rise=n_bad,
+    max_rise = float(per_cell_max.max())
+    p99_rise = float(np.percentile(per_cell_max, 99))
+    median_rise = float(np.percentile(per_cell_max, 50))
+    threshold = _RISE_COUNT_REL_THRESHOLD * peak_descent
+    n_bad = int((per_cell_max > threshold).sum())
+    return dict(max_rise=max_rise, p99_rise=p99_rise,
+                 median_rise=median_rise,
+                 n_cells_with_rise=n_bad,
                  frac_cells_with_rise=float(n_bad
-                                             / diff_in_disk.shape[0]))
+                                             / diff_in_disk.shape[0]),
+                 peak_descent=peak_descent,
+                 max_rise_rel=float(max_rise / peak_descent))
 
 
 def _radial_kink_stats(f: np.ndarray, x_canon: np.ndarray,
@@ -156,15 +191,22 @@ def _dead_cell_stats(f: np.ndarray, in_disk: np.ndarray) -> dict:
 
 
 def _verdict(stats: dict) -> str:
-    """Combine per-sim stat dicts into PASS / WARN / FAIL."""
-    if stats["temporal"]["max_rise"] > _TEMPORAL_RISE_FAIL:
+    """Combine per-sim stat dicts into PASS / WARN / FAIL.
+
+    Rise is judged RELATIVE to the sim's own peak descent so a
+    150 um-descent sim with 1 um rise (0.7% relative) is not the same
+    as a 15 um-descent sim with 1 um rise (6.7% relative). See
+    _TEMPORAL_RISE_REL_WARN / FAIL for the threshold definitions.
+    """
+    rr = stats["temporal"].get("max_rise_rel", 0.0)
+    if rr > _TEMPORAL_RISE_REL_FAIL:
         return "FAIL"
     if stats["dead_cells"]["frac_dead"] > _DEAD_CELL_FAIL:
         return "FAIL"
     if any(v["rel_kink"] > _KINK_REL_FAIL and v["edge_less_descended"]
            for v in stats["radial_kink"].values()):
         return "FAIL"
-    if stats["temporal"]["max_rise"] > _TEMPORAL_RISE_WARN:
+    if rr > _TEMPORAL_RISE_REL_WARN:
         return "WARN"
     if stats["dead_cells"]["frac_dead"] > _DEAD_CELL_WARN:
         return "WARN"
@@ -264,19 +306,21 @@ def _render_report(all_stats: list, per_sim_final_curves: list,
     ax.axvline(1.0, color="orange", ls="--", lw=1, label="1x median dt")
     ax.legend(fontsize=8)
 
-    # (0,1): temporal rise (loaded)
+    # (0,1): temporal rise (loaded) RELATIVE to peak descent
     ax = axes[0, 1]
-    ax.hist(np.log10(np.maximum(max_rises, 1e-12)), bins=20,
-             color=SENSOR_MARKER_COLOR, edgecolor="black", linewidth=0.5)
-    ax.set_xlabel("log10 max positive du_z/dt (m)  in-disk")
+    rise_rel = np.array([s["temporal"].get("max_rise_rel", 0.0)
+                          for s in all_stats])
+    ax.hist(rise_rel, bins=20, color=SENSOR_MARKER_COLOR,
+             edgecolor="black", linewidth=0.5)
+    ax.set_xlabel("max rise / peak descent  (dimensionless)")
     ax.set_ylabel("# sims")
     ax.set_title(f"B. Loaded temporal monotonicity  "
-                 f"(FAIL >= log10({_TEMPORAL_RISE_FAIL:g}))",
+                 f"(FAIL >= {_TEMPORAL_RISE_REL_FAIL:.2f} = 5%)",
                  fontsize=10)
-    ax.axvline(np.log10(_TEMPORAL_RISE_WARN), color="orange",
-                ls="--", lw=1, label="WARN")
-    ax.axvline(np.log10(_TEMPORAL_RISE_FAIL), color="red",
-                ls="--", lw=1, label="FAIL")
+    ax.axvline(_TEMPORAL_RISE_REL_WARN, color="orange",
+                ls="--", lw=1, label=f"WARN {_TEMPORAL_RISE_REL_WARN:.1%}")
+    ax.axvline(_TEMPORAL_RISE_REL_FAIL, color="red",
+                ls="--", lw=1, label=f"FAIL {_TEMPORAL_RISE_REL_FAIL:.1%}")
     ax.legend(fontsize=8)
 
     # (0,2): radial kink -- worst angle per sim
@@ -441,8 +485,9 @@ def main() -> int:
         n_checked=len(all_stats),
         thresholds=dict(
             treal_backward_warn=_TREAL_BACKWARD_WARN,
-            temporal_rise_warn=_TEMPORAL_RISE_WARN,
-            temporal_rise_fail=_TEMPORAL_RISE_FAIL,
+            temporal_rise_rel_warn=_TEMPORAL_RISE_REL_WARN,
+            temporal_rise_rel_fail=_TEMPORAL_RISE_REL_FAIL,
+            rise_count_rel_threshold=_RISE_COUNT_REL_THRESHOLD,
             kink_rel_warn=_KINK_REL_WARN,
             kink_rel_fail=_KINK_REL_FAIL,
             dead_cell_warn=_DEAD_CELL_WARN,
@@ -453,6 +498,9 @@ def main() -> int:
             n_fail=sum(1 for s in all_stats if s["verdict"] == "FAIL"),
             max_temporal_rise_across_all=max(
                 s["temporal"]["max_rise"] for s in all_stats),
+            max_rise_rel_across_all=max(
+                s["temporal"].get("max_rise_rel", 0.0)
+                for s in all_stats),
             max_kink_45_across_all=max(
                 s["radial_kink"]["theta=45"]["rel_kink"]
                 for s in all_stats),
@@ -476,7 +524,9 @@ def main() -> int:
     print(f"  raw tReal backward jumps in: "
           f"{agg['sims_with_any_raw_backward']} sim(s)")
     print(f"  max loaded temporal rise: "
-          f"{agg['max_temporal_rise_across_all']:.3e} m")
+          f"{agg['max_temporal_rise_across_all']:.3e} m "
+          f"({100 * agg.get('max_rise_rel_across_all', 0):.2f}% of "
+          f"peak descent)")
     print(f"  max relative kink at theta=45: "
           f"{agg['max_kink_45_across_all']:.3f}")
     if agg["n_fail"] > 0:
