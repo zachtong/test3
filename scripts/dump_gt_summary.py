@@ -17,6 +17,30 @@ import json
 from pathlib import Path
 
 
+def _recompute_kink(values_at_r: dict, r_upper: float) -> dict:
+    """Recompute the rise-from-min kink metric using ONLY the r_query
+    points at r <= r_upper. Sidesteps the need to re-run
+    inspect_gt_quality when the mask-aware threshold changes: the
+    already-saved values_at_r has enough resolution for a coarse
+    but valid kink."""
+    pts = sorted((float(r), float(u))
+                  for r, u in values_at_r.items()
+                  if float(r) <= r_upper)
+    if len(pts) < 2:
+        return dict(rel_kink=0.0, r_of_min=0.0, r_of_kink=0.0,
+                     u_at_min=0.0, rise_from_min=0.0)
+    argmin_i = min(range(len(pts)), key=lambda i: pts[i][1])
+    r_of_min, u_at_min = pts[argmin_i]
+    after = pts[argmin_i:]
+    argmax_j = max(range(len(after)), key=lambda j: after[j][1])
+    r_of_kink, u_max_after = after[argmax_j]
+    rise = max(0.0, u_max_after - u_at_min)
+    peak = abs(u_at_min)
+    return dict(rel_kink=float(rise / max(peak, 1e-12)),
+                 r_of_min=r_of_min, r_of_kink=r_of_kink,
+                 u_at_min=u_at_min, rise_from_min=rise)
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("summary_json",
@@ -31,10 +55,34 @@ def main() -> int:
                     "meaningful than raw rise for cross-sim "
                     "comparison). 'kink45' finds the sim whose 45-deg "
                     "final-frame edge kink is largest.")
+    ap.add_argument("--recompute-kink-r-upper", type=float, default=0.98,
+                    help="recompute per-angle rk/rMin/rKink using "
+                    "ONLY the values_at_r points at r <= this value "
+                    "(default 0.98). Sidesteps the need to re-run "
+                    "inspect_gt_quality just because the mask "
+                    "threshold changed: any r > 0.99 point in the "
+                    "cached json is currently 0 (loader rim mask) "
+                    "and using them would show a false 100% kink. "
+                    "Set to > 1 to disable the recompute (show "
+                    "whatever inspect wrote).")
     args = ap.parse_args()
 
     p = Path(args.summary_json)
     r = json.loads(p.read_text())
+
+    # Recompute per-angle kink metrics from the cached values_at_r
+    # using only points in [0, recompute_kink_r_upper]. Mutates the
+    # in-memory dict; the on-disk summary.json is untouched.
+    if args.recompute_kink_r_upper <= 1.0:
+        for s in r["per_sim"]:
+            for th_key, th_dict in s["radial_kink"].items():
+                new = _recompute_kink(th_dict["values_at_r"],
+                                       args.recompute_kink_r_upper)
+                th_dict.update(new)
+                th_dict["edge_less_descended"] = new["rise_from_min"] > 0
+        r["aggregate"]["max_kink_45_across_all"] = max(
+            s["radial_kink"]["theta=45"]["rel_kink"]
+            for s in r["per_sim"])
 
     a = r["aggregate"]
     rise_rel = a.get("max_rise_rel_across_all", 0.0)
