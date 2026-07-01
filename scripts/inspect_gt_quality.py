@@ -62,7 +62,8 @@ _root = Path(__file__).resolve().parent.parent
 if str(_root) not in sys.path:
     sys.path.insert(0, str(_root))
 
-from data.loader import load_dataset                            # noqa: E402
+from data.loader import (load_dataset,                          # noqa: E402
+                          _DISK_MASK_R_END)
 from scripts.viz_radial_kymograph import _sample_radial_kymograph  # noqa: E402
 from scripts.fieldviz import (provenance_footer,                # noqa: E402
                                WAFER_CMAP, SENSOR_MARKER_COLOR)
@@ -179,16 +180,35 @@ def _radial_kink_stats(f: np.ndarray, x_canon: np.ndarray,
     Also stored: raw u_z values at the requested r_query points so
     the dumper can show the full curve shape without re-computing.
     """
+    # Only scan the UNMASKED range (r < _DISK_MASK_R_END). Cells
+    # beyond that are intentionally zeroed by the loader; treating
+    # them as a kink would confuse the metric with the mask itself.
+    # Leave a small epsilon so the very edge of the mask is not
+    # sampled (bilinear resampling can bleed the mask edge).
+    r_upper = max(0.0, _DISK_MASK_R_END - 0.005)
     out = {}
     for th in angles:
         n_r = 512
         km = _sample_radial_kymograph(
             f.astype(np.float64), x_canon, y_canon, th, n_r=n_r)
-        final = km[:, -1]                                # (n_r,)
-        r_axis = np.linspace(0.0, 1.0, n_r)
-        vals = {r: float(np.interp(r, r_axis, final))
+        final_full = km[:, -1]                            # (n_r,)
+        r_axis_full = np.linspace(0.0, 1.0, n_r)
+        inside_mask = r_axis_full <= r_upper
+        final = final_full[inside_mask]
+        r_axis = r_axis_full[inside_mask]
+        # r_query values in the masked shell (>= _DISK_MASK_R_END)
+        # will render as 0 by definition of the mask. Show them
+        # anyway so the dumper output reveals the mask working.
+        vals = {r: float(np.interp(r, r_axis_full, final_full))
                  for r in r_query}
-        # rise-from-min metric (the real kink measure)
+        if final.size == 0:
+            # Degenerate: mask covers everything. Should not happen
+            # unless _DISK_MASK_R_END was configured near 0.
+            out[f"theta={th:g}"] = dict(
+                values_at_r=vals, rel_kink=0.0,
+                rise_from_min=0.0, r_of_min=0.0, r_of_kink=0.0,
+                u_at_min=0.0, edge_less_descended=False)
+            continue
         argmin = int(np.argmin(final))
         r_of_min = float(r_axis[argmin])
         u_at_min = float(final[argmin])
@@ -197,8 +217,6 @@ def _radial_kink_stats(f: np.ndarray, x_canon: np.ndarray,
         rise_from_min = float(max(0.0, max_u_after - u_at_min))
         peak_descent = float(abs(u_at_min))
         rel_kink = float(rise_from_min / max(peak_descent, 1e-12))
-        # Where the max-after-min occurs (should be near r=1 if the
-        # kink is at the rim).
         argmax_after = int(np.argmax(after_min))
         r_of_kink = float(r_axis[argmin + argmax_after])
         edge_less_descended = rise_from_min > 0
