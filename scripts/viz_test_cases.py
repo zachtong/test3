@@ -243,6 +243,14 @@ def main() -> int:
                     help="override --data.npz_dir (e.g. when running on "
                     "a different machine than training)")
     ap.add_argument("--value-scale", type=float, default=1.0e6)
+    ap.add_argument("--basis-file", default=None,
+                    help="direct path to a pod3d_*.npz basis file, "
+                    "BYPASSING the cache-key lookup. Use when you know "
+                    "which basis was fit during training (see "
+                    "outputs/basis_cache/) but the auto key derivation "
+                    "produces a MISS. The file's k_cache must be >= "
+                    "cfg.pod.k; a smaller stored K raises. Runs "
+                    "predict_run_fields without touching load_or_fit_basis.")
     ap.add_argument("--no-cache", action="store_true",
                     help="ignore the test-cases prediction cache and "
                     "re-run predict_run_fields (93 GB load + inference). "
@@ -317,7 +325,8 @@ def main() -> int:
         out = predict_run_fields(args.tag,
                                   idx=picked_indices.tolist(),
                                   output_dir=args.output_dir,
-                                  overrides=overrides, verbose=True)
+                                  overrides=overrides, verbose=True,
+                                  basis_override_path=args.basis_file)
         print(f"  predict_run_fields done in "
               f"{time.time() - t0:.1f}s", flush=True)
         try:
