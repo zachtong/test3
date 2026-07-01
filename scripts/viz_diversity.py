@@ -61,15 +61,20 @@ _STATS_CACHE_VERSION = 1
 
 def _stats_cache_key(folder: Path, nx: int, ny: int, nt: int,
                      drop_first_steps: int, limit: int | None) -> str:
-    """8-char hash uniquely identifying a (folder, grid, drop, limit)
-    diversity-stats build. Folder is the ABSOLUTE resolved path, so
-    moving the data invalidates the cache automatically."""
+    """8-char hash uniquely identifying a (folder, grid, drop, limit,
+    rim-mask r_end) diversity-stats build. Folder is the ABSOLUTE
+    resolved path, so moving the data invalidates the cache
+    automatically. Rim mask r_end is imported live from the loader
+    so any change to _DISK_MASK_R_END auto-invalidates the cache
+    (values behind the mask change, so std / mean change)."""
+    from data.loader import _DISK_MASK_R_END
     key = json.dumps({
         "version": _STATS_CACHE_VERSION,
         "folder": str(folder.resolve()),
         "nx": nx, "ny": ny, "nt": nt,
         "drop_first_steps": int(drop_first_steps),
         "limit": None if limit is None else int(limit),
+        "rim_r_end": float(_DISK_MASK_R_END),
     }, sort_keys=True).encode()
     return hashlib.sha256(key).hexdigest()[:8]
 
