@@ -67,19 +67,26 @@ def main() -> int:
               f"peakDesc={peak:.2e}")
         print(f"  rise cells={tp['n_cells_with_rise']} "
               f"frac={tp['frac_cells_with_rise']:.4f}")
-        # One-liner across all 3 angles
+        # One-liner across all 3 angles.
+        # rk = rise_from_min / peak_descent  (0 = no kink)
+        # rMin = r where u_z is deepest;  rKink = r where u_z re-rises to
+        # after that (should be near 1.0 for an edge artifact)
         rk = s["radial_kink"]
         parts = []
         for th_name in ("theta=0", "theta=45", "theta=90"):
             v = rk[th_name]
-            parts.append(f"{th_name.split('=')[1]:>2}:rk={v['rel_kink']:.3f}"
-                          f"{'T' if v['edge_less_descended'] else 'F'}")
+            parts.append(
+                f"{th_name.split('=')[1]:>2}:rk={v['rel_kink']:.2f}"
+                f"@rMin={v.get('r_of_min', 0):.2f}"
+                f",rKink={v.get('r_of_kink', 0):.3f}")
         print(f"  " + " | ".join(parts))
-        # θ=45 detailed u_z values
+        # theta=45 fine-grained u_z values at 4 outer r's so the
+        # curve shape is visible in text.
         v45 = rk["theta=45"]["values_at_r"]
-        print(f"  th45 u@[.85,.9,.95,.99]="
-              f"[{v45['0.85']:.2e},{v45['0.9']:.2e},"
-              f"{v45['0.95']:.2e},{v45['0.99']:.2e}]")
+        print(f"  th45 u@.95={v45.get('0.95', 0):.2e} "
+              f"u@.99={v45.get('0.99', 0):.2e} "
+              f"u@.995={v45.get('0.995', 0):.2e} "
+              f"u@.999={v45.get('0.999', 0):.2e}")
         print(f"  dead={s['dead_cells']['frac_dead']:.4f}")
     return 0
 

@@ -152,30 +152,63 @@ def _temporal_monotonicity(f: np.ndarray, in_disk: np.ndarray) -> dict:
 def _radial_kink_stats(f: np.ndarray, x_canon: np.ndarray,
                         y_canon: np.ndarray,
                         angles: tuple = (0.0, 45.0, 90.0),
-                        r_query: tuple = (0.85, 0.90, 0.95, 0.99)
+                        r_query: tuple = (0.85, 0.90, 0.95, 0.97,
+                                            0.99, 0.995, 0.999)
                         ) -> dict:
-    """At final t, sample u_z along each ray at r_query values.
-    Report the (r=0.99 vs r=0.95) relative jump per angle."""
+    """At the final timestep, look for an upward kink at the disk
+    edge -- the artifact the operator sees in the radial-anim viz.
+
+    'edge kink' = the rise-back-from-deepest-descent along the ray.
+    Concretely:
+      1. Sample u_z along the ray at 512 r points in [0, 1].
+      2. Find r_min = argmin(u_z) -- deepest descent along the ray.
+      3. Report max_u_after_min = max(u_z[r >= r_min]) which is the
+         edge cell's value if u_z stays flat, or something less
+         descended if u_z curves up.
+      4. rise_from_min = max_u_after_min - u_z_at_r_min.
+      5. rel_kink = rise_from_min / peak_descent  (0 = no kink;
+         0.5 = edge is 50% less descended than the deepest point).
+
+    Physical wafer bonding curves down MONOTONICALLY from center to
+    edge (or is flat once fully bonded), so any rise_from_min > 0
+    means the loader is producing a non-physical bump right at the
+    rim. r_of_kink pinpoints where; a small r_of_kink relative to 1
+    means the artifact is right at the edge (the r > 0.99 region
+    the operator identified).
+
+    Also stored: raw u_z values at the requested r_query points so
+    the dumper can show the full curve shape without re-computing.
+    """
     out = {}
     for th in angles:
-        # Reuse _sample_radial_kymograph with a small n_r; we only
-        # want to know the final-frame values at specific r's.
         n_r = 512
         km = _sample_radial_kymograph(
             f.astype(np.float64), x_canon, y_canon, th, n_r=n_r)
-        final = km[:, -1]
+        final = km[:, -1]                                # (n_r,)
         r_axis = np.linspace(0.0, 1.0, n_r)
-        vals = {r: float(np.interp(r, r_axis, final)) for r in r_query}
-        # Relative kink between r=0.99 and r=0.95.
-        v95 = vals[0.95]; v99 = vals[0.99]
-        base = max(abs(v95), abs(v99), 1e-12)
-        rel_kink = float(abs(v99 - v95) / base)
-        # 'edge_less_descended' = True if r=0.99 is closer to 0 (less
-        # descended) than r=0.95 -- matches the operator's 'sharp
-        # upward kink' observation.
-        edge_less_descended = (abs(v99) < abs(v95))
+        vals = {r: float(np.interp(r, r_axis, final))
+                 for r in r_query}
+        # rise-from-min metric (the real kink measure)
+        argmin = int(np.argmin(final))
+        r_of_min = float(r_axis[argmin])
+        u_at_min = float(final[argmin])
+        after_min = final[argmin:]
+        max_u_after = float(after_min.max())
+        rise_from_min = float(max(0.0, max_u_after - u_at_min))
+        peak_descent = float(abs(u_at_min))
+        rel_kink = float(rise_from_min / max(peak_descent, 1e-12))
+        # Where the max-after-min occurs (should be near r=1 if the
+        # kink is at the rim).
+        argmax_after = int(np.argmax(after_min))
+        r_of_kink = float(r_axis[argmin + argmax_after])
+        edge_less_descended = rise_from_min > 0
         out[f"theta={th:g}"] = dict(
-            values_at_r=vals, rel_kink=rel_kink,
+            values_at_r=vals,
+            rel_kink=rel_kink,
+            rise_from_min=rise_from_min,
+            r_of_min=r_of_min,
+            r_of_kink=r_of_kink,
+            u_at_min=u_at_min,
             edge_less_descended=edge_less_descended)
     return out
 
