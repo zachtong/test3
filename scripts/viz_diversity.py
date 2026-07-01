@@ -35,6 +35,8 @@ Use --limit N to subsample the folder while iterating.
 
 from __future__ import annotations
 import argparse
+import hashlib
+import json
 import sys
 import time
 from pathlib import Path
@@ -48,6 +50,72 @@ if str(_root) not in sys.path:
 from data.loader import load_dataset                         # noqa: E402
 from scripts.fieldviz import (mirror_d2, render_full_disk,    # noqa: E402
                                provenance_footer)
+
+
+# Cache-file prefix; matches the loader's `_` convention so viz_all's
+# _pick_sims globbing skips it. Version integer bumps whenever the
+# schema (which arrays are stored) changes so old caches auto-invalidate.
+_STATS_CACHE_PREFIX = "_diversity_stats_"
+_STATS_CACHE_VERSION = 1
+
+
+def _stats_cache_key(folder: Path, nx: int, ny: int, nt: int,
+                     drop_first_steps: int, limit: int | None) -> str:
+    """8-char hash uniquely identifying a (folder, grid, drop, limit)
+    diversity-stats build. Folder is the ABSOLUTE resolved path, so
+    moving the data invalidates the cache automatically."""
+    key = json.dumps({
+        "version": _STATS_CACHE_VERSION,
+        "folder": str(folder.resolve()),
+        "nx": nx, "ny": ny, "nt": nt,
+        "drop_first_steps": int(drop_first_steps),
+        "limit": None if limit is None else int(limit),
+    }, sort_keys=True).encode()
+    return hashlib.sha256(key).hexdigest()[:8]
+
+
+def _stats_cache_path(folder: Path, nx: int, ny: int, nt: int,
+                      drop_first_steps: int,
+                      limit: int | None) -> Path:
+    h = _stats_cache_key(folder, nx, ny, nt, drop_first_steps, limit)
+    return folder / f"{_STATS_CACHE_PREFIX}{h}.npz"
+
+
+def _load_stats_cache(path: Path):
+    """Return (mean, var, n_eff, x_canon, y_canon) on hit, None on
+    miss (including corruption). Version tag is verified explicitly."""
+    if not path.is_file():
+        return None
+    try:
+        with np.load(path, allow_pickle=False) as d:
+            if int(d.get("version", -1)) != _STATS_CACHE_VERSION:
+                return None
+            return (d["mean"].astype(np.float64),
+                    d["var"].astype(np.float64),
+                    int(d["n_eff"]),
+                    d["x_canon"].astype(np.float64),
+                    d["y_canon"].astype(np.float64))
+    except (OSError, ValueError, KeyError) as e:
+        print(f"  diversity cache read failed ({type(e).__name__}: {e}) "
+              f"-- rebuilding", flush=True)
+        return None
+
+
+def _save_stats_cache(path: Path, mean: np.ndarray, var: np.ndarray,
+                      n_eff: int, x_canon: np.ndarray,
+                      y_canon: np.ndarray) -> None:
+    """Atomic write via .tmp -> rename so a crash mid-save leaves
+    the previous cache intact."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".tmp.npz")
+    np.savez(tmp,
+             version=np.int32(_STATS_CACHE_VERSION),
+             mean=mean.astype(np.float32),
+             var=var.astype(np.float32),
+             n_eff=np.int32(n_eff),
+             x_canon=x_canon.astype(np.float64),
+             y_canon=y_canon.astype(np.float64))
+    tmp.replace(path)
 
 
 def _welford_mean_var(sims, verbose: bool = True):
@@ -131,6 +199,13 @@ def main() -> int:
                     help="multiply std for display (1e6 m -> um)")
     ap.add_argument("--workers", type=int, default=None,
                     help="loader workers (defaults to loader auto)")
+    ap.add_argument("--no-cache", action="store_true",
+                    help="ignore any pre-computed diversity-stats cache "
+                    "and always redo the full 93 GB load + Welford. "
+                    "Use this when you suspect the cache is stale.")
+    ap.add_argument("--force", action="store_true",
+                    help="rebuild AND overwrite the diversity-stats "
+                    "cache even on a valid hit. Implies --no-cache.")
     ap.add_argument("--tag", default=None)
     args = ap.parse_args()
 
@@ -141,19 +216,50 @@ def main() -> int:
     angles = [float(a) for a in args.angles.split(",")]
     snap_times = [float(t) for t in args.snapshot_times.split(",")]
 
-    print(f"loading sims from {folder} (limit={args.limit}, "
-          f"drop_first_steps={args.drop_first_steps}) ...", flush=True)
-    x_canon, y_canon, sims = load_dataset(
-        folder, nx=args.nx, ny=args.ny, nt=args.nt,
-        cache=True, limit=args.limit,
-        workers=args.workers,
-        drop_first_steps=args.drop_first_steps)
-    print(f"  loaded {len(sims)} sims  shape per sim {sims[0].f.shape}",
-          flush=True)
+    # Try the diversity-stats cache first -- it holds the (mean, var,
+    # n_eff, x_canon, y_canon) tensors for this (folder, grid, drop,
+    # limit) combination. A hit skips both the 93 GB loader read AND
+    # the Welford pass. See _stats_cache_key for what identifies a
+    # cache; moving the folder, changing nx/ny/nt/drop/limit all
+    # invalidate. If you know the cache is stale, pass --no-cache
+    # (or --force to also overwrite the file after the rebuild).
+    cache_path = _stats_cache_path(folder, args.nx, args.ny, args.nt,
+                                     args.drop_first_steps, args.limit)
+    hit = (None if (args.no_cache or args.force)
+           else _load_stats_cache(cache_path))
+    if hit is not None:
+        mean, var, n_eff, x_canon, y_canon = hit
+        print(f"diversity cache HIT -> {cache_path.name}  "
+              f"(n_eff={n_eff}, shape={mean.shape})", flush=True)
+    else:
+        if cache_path.exists() and args.no_cache:
+            print(f"  --no-cache: skipping {cache_path.name}", flush=True)
+        print(f"loading sims from {folder} (limit={args.limit}, "
+              f"drop_first_steps={args.drop_first_steps}) ...",
+              flush=True)
+        t_load = time.time()
+        x_canon, y_canon, sims = load_dataset(
+            folder, nx=args.nx, ny=args.ny, nt=args.nt,
+            cache=True, limit=args.limit,
+            workers=args.workers,
+            drop_first_steps=args.drop_first_steps)
+        print(f"  loaded {len(sims)} sims  shape per sim "
+              f"{sims[0].f.shape}  in {time.time() - t_load:.1f}s",
+              flush=True)
+        print(f"computing Welford mean+var over {len(sims)} sims ...",
+              flush=True)
+        mean, var, n_eff = _welford_mean_var(sims)
+        try:
+            _save_stats_cache(cache_path, mean, var, n_eff,
+                              x_canon, y_canon)
+            print(f"  wrote diversity cache -> {cache_path.name} "
+                  f"(~{(cache_path.stat().st_size >> 20)} MB)",
+                  flush=True)
+        except OSError as e:
+            print(f"  WARN: could not write diversity cache "
+                  f"({type(e).__name__}: {e}); continuing anyway",
+                  flush=True)
 
-    print(f"computing Welford mean+var over {len(sims)} sims ...",
-          flush=True)
-    mean, var, n_eff = _welford_mean_var(sims)
     std = np.sqrt(var) * args.value_scale
     nx, ny, nt = std.shape
     print(f"  std field shape {std.shape}  "

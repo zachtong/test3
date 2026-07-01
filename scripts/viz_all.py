@@ -193,6 +193,14 @@ def main() -> int:
     ap.add_argument("--diversity-limit", type=int, default=None,
                     help="cap on sims used for diversity viz; full "
                     "folder by default")
+    ap.add_argument("--rebuild-diversity-cache", action="store_true",
+                    help="force viz_diversity to redo the 93 GB load "
+                    "+ Welford pass and overwrite its stats cache. "
+                    "The stats cache holds the (mean, var, n_eff) "
+                    "tensors keyed on (folder, grid, drop, limit); a "
+                    "hit skips the giant read. Use this only when you "
+                    "suspect the cache is stale (folder changed, npz "
+                    "files added/removed without a rename).")
     ap.add_argument("--show-lower", action="store_true",
                     help="draw the flat lower-wafer reference plane on "
                     "all 3D viz (gif_3d, strip_3d, interactive). "
@@ -256,6 +264,8 @@ def main() -> int:
             cmd += ["--limit", str(args.diversity_limit)]
         if args.workers is not None:
             cmd += ["--workers", str(args.workers)]
+        if args.rebuild_diversity_cache:
+            cmd += ["--force"]
         if args.tag:
             cmd += ["--tag", args.tag]
         _run(cmd, target, args.force, log)

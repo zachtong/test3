@@ -120,6 +120,81 @@ def test_bonded_mask_rule_3_monotonic_in_time():
     assert (diff >= 0).all(), "bonded mask should never retreat in time"
 
 
+def test_diversity_stats_cache_roundtrip(tmp_path):
+    """Diversity cache: write then read must return identical (mean, var,
+    n_eff, axes). Guards against silent schema drift where the reader
+    forgets an array the writer stored."""
+    from scripts.viz_diversity import (
+        _stats_cache_path, _save_stats_cache, _load_stats_cache,
+        _STATS_CACHE_PREFIX)
+
+    folder = tmp_path / "diversity_folder"
+    folder.mkdir()
+    mean = np.random.default_rng(0).standard_normal((8, 8, 4)) * 1e-6
+    var = np.abs(np.random.default_rng(1).standard_normal((8, 8, 4))) * 1e-12
+    n_eff = 42
+    x_canon = np.linspace(0, 1, 8)
+    y_canon = np.linspace(0, 1, 8)
+
+    path = _stats_cache_path(folder, 8, 8, 4, 1, None)
+    assert path.name.startswith(_STATS_CACHE_PREFIX)
+    assert path.parent == folder
+
+    _save_stats_cache(path, mean, var, n_eff, x_canon, y_canon)
+    hit = _load_stats_cache(path)
+    assert hit is not None
+    m2, v2, n2, x2, y2 = hit
+    assert n2 == n_eff
+    # Cache stores as float32 for size; allow that rounding.
+    assert np.allclose(m2, mean, atol=1e-9)
+    assert np.allclose(v2, var, atol=1e-16)
+    assert np.array_equal(x2, x_canon)
+    assert np.array_equal(y2, y_canon)
+
+
+def test_diversity_stats_cache_invalidates_on_key_change(tmp_path):
+    """Different (folder, grid, drop, limit) tuples must produce
+    different cache paths so a rebuild after ANY key change goes to a
+    fresh file instead of clobbering a valid one for another config."""
+    from scripts.viz_diversity import _stats_cache_path
+    folder = tmp_path / "d"
+    folder.mkdir()
+    base = _stats_cache_path(folder, 8, 8, 4, 1, None)
+    paths = {
+        "nx":    _stats_cache_path(folder, 16, 8, 4, 1, None),
+        "ny":    _stats_cache_path(folder, 8, 16, 4, 1, None),
+        "nt":    _stats_cache_path(folder, 8, 8, 8, 1, None),
+        "drop":  _stats_cache_path(folder, 8, 8, 4, 0, None),
+        "limit": _stats_cache_path(folder, 8, 8, 4, 1, 100),
+        "other": _stats_cache_path(tmp_path / "other", 8, 8, 4, 1, None),
+    }
+    (tmp_path / "other").mkdir()
+    paths["other"] = _stats_cache_path(tmp_path / "other", 8, 8, 4, 1, None)
+    seen = {base}
+    for k, p in paths.items():
+        assert p != base, f"{k} did not change the cache key"
+        assert p not in seen, f"{k} collided with a previous key"
+        seen.add(p)
+
+
+def test_diversity_stats_cache_rejects_stale_version(tmp_path):
+    """A cache file written under an older version tag must be
+    rejected by _load_stats_cache (returns None) so schema changes
+    don't silently ship the old contents."""
+    from scripts.viz_diversity import (_stats_cache_path,
+                                          _load_stats_cache)
+    folder = tmp_path / "d"
+    folder.mkdir()
+    path = _stats_cache_path(folder, 8, 8, 4, 1, None)
+    np.savez(path, version=np.int32(-999),
+             mean=np.zeros((8, 8, 4), dtype=np.float32),
+             var=np.zeros((8, 8, 4), dtype=np.float32),
+             n_eff=np.int32(1),
+             x_canon=np.linspace(0, 1, 8),
+             y_canon=np.linspace(0, 1, 8))
+    assert _load_stats_cache(path) is None
+
+
 def test_topdown_contour_does_not_accumulate_across_frames(tmp_path):
     """Concentric-rings regression. Pre-fix, _redraw_contour relied on
     ContourSet.collections which matplotlib 3.8 deprecated / 3.10 removed.

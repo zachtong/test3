@@ -125,6 +125,10 @@ to see only what training sees.
 | Cross-sim diversity / variance (std kymograph + top-down) | `python scripts/viz_diversity.py --npz-dir <folder> --out viz/diversity.png` | PNG ~150 KB |
 | Same, but quick preview from 200 sims | `... --limit 200 --out viz/diversity_n200.png` | same; faster |
 | Cap loader workers (fat node / shared box) | `... --workers 16` or `WAFER3D_LOADER_WORKERS_CAP=16 python ...` | safer on shared machines |
+| Force diversity stats rebuild (folder changed) | `... --force` | rebuilds cache; ~50 MB |
+| Skip diversity stats cache once (no overwrite) | `... --no-cache` | one-shot bypass |
+
+Diversity stats cache: viz_diversity writes `<npz_dir>/_diversity_stats_<hash>.npz` (~50 MB) holding the (mean, var, n_eff) tensors. On any re-run with the same (folder, nx, ny, nt, drop, limit), the 93 GB loader read + Welford pass are SKIPPED and the figure renders in <1 s. Cache invalidates automatically when any key element changes. Pass `--no-cache` to bypass once, `--force` to rebuild AND overwrite. From `viz_all` use `--rebuild-diversity-cache` to plumb through.
 
 Loader worker policy: when `--workers` is not set, the loader picks
 `min(host_cores - 2, 32)` automatically. The 32 ceiling stops a 256-core
