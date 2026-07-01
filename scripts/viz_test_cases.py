@@ -195,6 +195,169 @@ def _pick_indices(field_errs: np.ndarray, pick: str, topn: int,
     raise ValueError(f"unknown --pick {pick!r}, valid: {_VALID_PICKS}")
 
 
+def _render_snapshot(out_path, *, gt, pr, err, a_pred, a_true, t, K,
+                     x_canon, y_canon, sensor_xy, sim_id, tag,
+                     rel_l2, test_idx, sel_label, results_path):
+    """Legacy 2-row layout: (GT / pred / |err|) at t* on the top row +
+    K subplots of a_k(t) on the bottom. Kept identical to the pre-
+    --layout behavior so 'snapshot' outputs are unchanged."""
+    import matplotlib.pyplot as plt
+
+    err_integrated = err.sum(axis=(0, 1))
+    t_star = int(np.argmax(err_integrated))
+    vmin, vmax = wafer_value_range(
+        np.stack([gt[..., t_star], pr[..., t_star]]))
+    err_max = float(np.percentile(err[..., t_star], 99))
+    if err_max <= 0:
+        err_max = max(float(err.max()), 1e-12)
+
+    n_cols = max(K, 3)
+    fig, axes = plt.subplots(2, n_cols,
+                             figsize=(3.5 * n_cols, 7.2),
+                             constrained_layout=True)
+    for c, (panel_data, title, cmap, panel_vmin, panel_vmax) in enumerate([
+            (gt[..., t_star], "GT", WAFER_CMAP, vmin, vmax),
+            (pr[..., t_star], "predicted", WAFER_CMAP, vmin, vmax),
+            (err[..., t_star], "abs error", "viridis", 0, err_max),
+    ]):
+        ax = axes[0, c]
+        render_full_disk(ax, panel_data, x_canon, y_canon,
+                         cmap=cmap, vmin=panel_vmin, vmax=panel_vmax,
+                         mirror=True, mask_off_disk=True,
+                         sensor_xy=sensor_xy)
+        ax.set_title(f"{title}  t-idx {t_star}/{gt.shape[-1] - 1}",
+                     fontsize=10)
+        ax.set_xticks([-1, 0, 1]); ax.set_yticks([-1, 0, 1])
+    for c in range(3, n_cols):
+        axes[0, c].set_visible(False)
+
+    for k_idx in range(K):
+        c = k_idx
+        ax = axes[1, c]
+        ax.plot(t, a_true[k_idx], color="0.3", lw=1.2, label="true")
+        ax.plot(t, a_pred[k_idx], color=SENSOR_MARKER_COLOR,
+                lw=1.2, ls="--", label="predicted")
+        err_k = float(np.linalg.norm(a_pred[k_idx] - a_true[k_idx])
+                      / max(np.linalg.norm(a_true[k_idx]), 1e-12))
+        ax.set_title(f"a_{k_idx + 1}  rel-L2={err_k:.3f}", fontsize=9)
+        ax.grid(alpha=0.3)
+        ax.set_xlabel("normalized t")
+        if c == 0:
+            ax.legend(fontsize=7, loc="best")
+    for c in range(K, n_cols):
+        axes[1, c].set_visible(False)
+
+    fig.suptitle(
+        f"{tag}  |  {sel_label}  |  test_idx={int(test_idx)}  |  "
+        f"rel-L2={rel_l2:.4f}  |  {sim_id}", fontsize=11)
+    provenance_footer(fig, sim_id=sim_id, tag=tag,
+                      results_file=results_path,
+                      extras={"test_idx": int(test_idx),
+                              "rel_l2": f"{rel_l2:.4f}",
+                              "t_star": t_star,
+                              "sel": (sel_label.split()[0]),
+                              "layout": "snapshot"})
+    fig.savefig(out_path, dpi=130, bbox_inches="tight")
+    plt.close(fig)
+
+
+def _render_kymo_compare(out_path, *, w_true_m, w_pred_m, x_canon,
+                          y_canon, angles, sim_id, tag, rel_l2,
+                          test_idx, sel_label, results_path,
+                          value_scale=1.0e6):
+    """3-row x 3-col kymograph comparison.
+
+    Rows: theta = angles (default 0 / 45 / 90 deg)
+    Cols: GT / predicted / |GT - predicted|
+    Axes per panel: x = normalized time, y = r in [0, 1]
+
+    Shares one WAFER_CMAP vmin/vmax across GT+pred (per sim, all
+    angles combined) so the eye compares apples to apples across the
+    six left+middle panels. Error column gets its own viridis scale
+    with vmin=0.
+
+    Inputs are in physical units (metres); value_scale (default 1e6
+    for micrometres) is applied inside for display + colorbar labels.
+    """
+    from scripts.viz_radial_kymograph import _sample_radial_kymograph
+    import matplotlib.pyplot as plt
+
+    n_r = w_true_m.shape[0]
+    kymos_gt = [_sample_radial_kymograph(
+        w_true_m.astype(np.float64), x_canon, y_canon, th, n_r=n_r)
+        for th in angles]
+    kymos_pr = [_sample_radial_kymograph(
+        w_pred_m.astype(np.float64), x_canon, y_canon, th, n_r=n_r)
+        for th in angles]
+    scaled_gt = [k * value_scale for k in kymos_gt]
+    scaled_pr = [k * value_scale for k in kymos_pr]
+    scaled_err = [np.abs(g - p) for g, p in zip(scaled_gt, scaled_pr)]
+
+    all_signed = np.concatenate(
+        [k.ravel() for k in scaled_gt]
+        + [k.ravel() for k in scaled_pr])
+    vmin, vmax = wafer_value_range(all_signed)
+    all_err = np.concatenate([k.ravel() for k in scaled_err])
+    err_max = float(np.percentile(all_err, 99))
+    if err_max <= 0:
+        err_max = max(float(all_err.max()), 1e-12)
+
+    nt = w_true_m.shape[-1]
+    t_axis = np.linspace(0.0, 1.0, nt)
+    r_axis = np.linspace(0.0, 1.0, n_r)
+    n_rows = len(angles)
+    fig, axes = plt.subplots(n_rows, 3,
+                              figsize=(12.0, 3.0 * n_rows + 0.6),
+                              sharex=True, sharey=True,
+                              constrained_layout=True)
+    if n_rows == 1:
+        axes = axes[None, :]
+    ims_col = [None, None, None]
+    for i, th in enumerate(angles):
+        panels = [(scaled_gt[i], WAFER_CMAP, vmin, vmax),
+                  (scaled_pr[i], WAFER_CMAP, vmin, vmax),
+                  (scaled_err[i], "viridis", 0.0, err_max)]
+        for j, (data, cmap, lo, hi) in enumerate(panels):
+            ax = axes[i, j]
+            im = ax.imshow(data, origin="lower", aspect="auto",
+                           extent=[t_axis[0], t_axis[-1],
+                                    r_axis[0], r_axis[-1]],
+                           vmin=lo, vmax=hi, cmap=cmap,
+                           interpolation="nearest")
+            ims_col[j] = im
+            if i == 0:
+                ax.set_title(("GT", "predicted", "|GT - pred|")[j],
+                             fontsize=11)
+            if j == 0:
+                ax.set_ylabel(f"theta={th:g} deg\nr (normalized)",
+                              fontsize=9)
+        axes[i, 0].set_ylim(r_axis[0], r_axis[-1])
+    for j in range(3):
+        axes[-1, j].set_xlabel("normalized time")
+
+    # Two colorbars total: one shared across GT + pred columns
+    # (they use the same vmin/vmax so a single bar is honest and
+    # unclutters the layout), and one for the error column.
+    fig.colorbar(ims_col[0], ax=axes[:, :2].ravel().tolist(),
+                  shrink=0.85, location="right", pad=0.02,
+                  label=f"u_z * {value_scale:g}  (GT and predicted)")
+    fig.colorbar(ims_col[2], ax=axes[:, 2].tolist(),
+                  shrink=0.85, location="right", pad=0.02,
+                  label=f"|GT - pred| * {value_scale:g}")
+
+    fig.suptitle(
+        f"{tag}  |  {sel_label}  |  test_idx={int(test_idx)}  |  "
+        f"rel-L2={rel_l2:.4f}  |  {sim_id}  |  radial kymo GT vs pred",
+        fontsize=11)
+    # Keep extras minimal: layout + angles are already in the suptitle.
+    provenance_footer(fig, sim_id=sim_id, tag=tag,
+                      results_file=results_path,
+                      extras={"idx": int(test_idx),
+                              "sel": (sel_label.split()[0])})
+    fig.savefig(out_path, dpi=130, bbox_inches="tight")
+    plt.close(fig)
+
+
 def _resolve_sim_basenames(basenames_list: list, wanted: list
                             ) -> tuple[np.ndarray, list]:
     """Map a comma list of user-supplied basenames to test-split
@@ -251,6 +414,20 @@ def main() -> int:
                     "produces a MISS. The file's k_cache must be >= "
                     "cfg.pod.k; a smaller stored K raises. Runs "
                     "predict_run_fields without touching load_or_fit_basis.")
+    ap.add_argument("--layout", choices=("snapshot", "kymo", "both"),
+                    default="snapshot",
+                    help="figure layout per selected sim. "
+                    "'snapshot' (default): 3 full-disk heatmaps at t* "
+                    "(GT/pred/err) + K a_k(t) subplots -- the legacy "
+                    "worst-case triage view. 'kymo': 3x3 grid of radial-"
+                    "slice kymographs (rows=theta 0/45/90, cols=GT/"
+                    "pred/|err|) -- shows how w(r,t) prediction tracks "
+                    "GT over time along the lab-rig sensor angles. "
+                    "'both' emits both PNGs; the kymo one gets a "
+                    "'_kymo' filename suffix.")
+    ap.add_argument("--kymo-angles", default="0,45,90",
+                    help="comma list of theta values (deg) for the "
+                    "kymo layout (default: 0,45,90 -- lab rig)")
     ap.add_argument("--no-cache", action="store_true",
                     help="ignore the test-cases prediction cache and "
                     "re-run predict_run_fields (93 GB load + inference). "
@@ -350,90 +527,56 @@ def main() -> int:
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
+    kymo_angles = [float(a) for a in args.kymo_angles.split(",")
+                    if a.strip()]
+    want_snapshot = args.layout in ("snapshot", "both")
+    want_kymo = args.layout in ("kymo", "both")
+
     for slot, test_idx in enumerate(out["idx"]):
+        # w_true / w_pred are in physical units (metres). The snapshot
+        # helper multiplies by value_scale internally (values render
+        # scaled and the colorbar labels reflect that). The kymo helper
+        # takes metres directly and does the same.
         gt = out["w_true"][slot] * args.value_scale
         pr = out["w_pred"][slot] * args.value_scale
         err = np.abs(gt - pr)
-        a_pred = out["a_pred"][slot]                # (K, Nt)
-        a_true = out["a_true"][slot]
         bname = out["basenames"][slot]
         rel_l2 = float(field_errs[test_idx])
-
-        # t* = time of max abs error (integrate over space).
-        err_integrated = err.sum(axis=(0, 1))
-        t_star = int(np.argmax(err_integrated))
-
-        # Shared sequential color scale for GT + pred (so the visual
-        # comparison is valid). Error panel gets its own viridis range.
-        vmin, vmax = wafer_value_range(
-            np.stack([gt[..., t_star], pr[..., t_star]]))
-        err_max = float(np.percentile(err[..., t_star], 99))
-        if err_max <= 0:
-            err_max = max(float(err.max()), 1e-12)
-
-        n_cols = max(K, 3)
-        fig, axes = plt.subplots(2, n_cols,
-                                 figsize=(3.5 * n_cols, 7.2),
-                                 constrained_layout=True)
-
-        # TOP ROW: 3 full-disk heatmaps at t*
-        for c, (panel_data, title, cmap, panel_vmin, panel_vmax) in enumerate([
-                (gt[..., t_star], "GT", WAFER_CMAP, vmin, vmax),
-                (pr[..., t_star], "predicted", WAFER_CMAP, vmin, vmax),
-                (err[..., t_star], "abs error", "viridis", 0, err_max),
-        ]):
-            ax = axes[0, c]
-            render_full_disk(ax, panel_data, x_canon, y_canon,
-                             cmap=cmap, vmin=panel_vmin, vmax=panel_vmax,
-                             mirror=True, mask_off_disk=True,
-                             sensor_xy=sensor_xy)
-            ax.set_title(f"{title}  t-idx {t_star}/{gt.shape[-1] - 1}",
-                         fontsize=10)
-            ax.set_xticks([-1, 0, 1]); ax.set_yticks([-1, 0, 1])
-        # hide top-row spares
-        for c in range(3, n_cols):
-            axes[0, c].set_visible(False)
-
-        # BOTTOM ROW: K subplots of a_k(t) predicted vs true
-        for k_idx in range(K):
-            c = k_idx
-            ax = axes[1, c]
-            ax.plot(t, a_true[k_idx], color="0.3", lw=1.2, label="true")
-            ax.plot(t, a_pred[k_idx], color=SENSOR_MARKER_COLOR,
-                    lw=1.2, ls="--", label="predicted")
-            err_k = float(np.linalg.norm(a_pred[k_idx] - a_true[k_idx])
-                          / max(np.linalg.norm(a_true[k_idx]), 1e-12))
-            ax.set_title(f"a_{k_idx + 1}  rel-L2={err_k:.3f}",
-                         fontsize=9)
-            ax.grid(alpha=0.3)
-            ax.set_xlabel("normalized t")
-            if c == 0:
-                ax.legend(fontsize=7, loc="best")
-        for c in range(K, n_cols):
-            axes[1, c].set_visible(False)
-
-        fig.suptitle(
-            f"{args.tag}  |  {label}  |  test_idx={int(test_idx)}  |  "
-            f"rel-L2={rel_l2:.4f}  |  {bname}", fontsize=11)
-        provenance_footer(fig, sim_id=bname, tag=args.tag,
-                          results_file=results_path,
-                          extras={"test_idx": int(test_idx),
-                                  "rel_l2": f"{rel_l2:.4f}",
-                                  "t_star": t_star,
-                                  "sel": (label.split()[0])})
-
-        # Filename: <slot>_relL2<val>_<basename>.png so ls sorts by
-        # slot; the 4-digit slot prefix avoids ties when two sims
-        # share a basename root.
+        # Filename: <slot>_relL2<val>_<basename>.png (kymo variant adds
+        # a _kymo suffix). Slot prefix avoids ties when two sims share
+        # a basename root.
         stem = Path(bname).stem if bname else f"test{int(test_idx)}"
-        fname = f"{slot:04d}_relL2{rel_l2:.4f}_{stem}.png"
-        outp = out_dir / fname
-        fig.savefig(outp, dpi=130, bbox_inches="tight")
-        plt.close(fig)
-        print(f"  wrote {outp}", flush=True)
+        base_name = f"{slot:04d}_relL2{rel_l2:.4f}_{stem}"
 
-    print(f"\nall {len(out['idx'])} test-case figure(s) -> {out_dir}",
-          flush=True)
+        if want_snapshot:
+            snap_out = out_dir / f"{base_name}.png"
+            _render_snapshot(
+                snap_out,
+                gt=gt, pr=pr, err=err,
+                a_pred=out["a_pred"][slot], a_true=out["a_true"][slot],
+                t=t, K=K,
+                x_canon=x_canon, y_canon=y_canon,
+                sensor_xy=sensor_xy,
+                sim_id=bname, tag=args.tag,
+                rel_l2=rel_l2, test_idx=int(test_idx),
+                sel_label=label, results_path=results_path)
+            print(f"  wrote {snap_out}", flush=True)
+        if want_kymo:
+            kymo_out = out_dir / f"{base_name}_kymo.png"
+            _render_kymo_compare(
+                kymo_out,
+                w_true_m=out["w_true"][slot],
+                w_pred_m=out["w_pred"][slot],
+                x_canon=x_canon, y_canon=y_canon,
+                angles=kymo_angles,
+                sim_id=bname, tag=args.tag,
+                rel_l2=rel_l2, test_idx=int(test_idx),
+                sel_label=label, results_path=results_path,
+                value_scale=args.value_scale)
+            print(f"  wrote {kymo_out}", flush=True)
+
+    n_out = len(out["idx"]) * (int(want_snapshot) + int(want_kymo))
+    print(f"\nall {n_out} test-case figure(s) -> {out_dir}", flush=True)
     return 0
 
 
