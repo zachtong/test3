@@ -161,6 +161,7 @@ training prints it when fitting.
 | Goal | Command | Output |
 |---|---|---|
 | Render top-N worst test sims (GT vs pred vs error + a_k(t) curves) | `python scripts/viz_test_cases.py --tag <tag> --pick worst --topn 5 --out viz/worst/` | PNG per sim |
+| Batch 4 picks in ONE predict_run_fields call (saves 3x load) | `... --pick worst,best,median,random --topn 5 --out viz/all_picks/` | PNGs under viz/all_picks/{worst,best,median,random}/ |
 | Same but as GT-vs-pred radial kymograph (3x3 grid, theta=0/45/90 vs GT/pred/err) | `... --layout kymo` | PNG per sim, `_kymo` suffix |
 | Both snapshot AND kymo for each sim | `... --layout both` | 2 PNGs per sim |
 | Direct-load a specific basis file (bypass cache-key lookup) | `... --basis-file outputs/basis_cache/pod3d_<hash>.npz` | avoids fitting |

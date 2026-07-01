@@ -386,10 +386,16 @@ def main() -> int:
     ap.add_argument("--topn", type=int, default=5,
                     help="number of sims to render for --pick modes; "
                     "ignored when --sim is used")
-    ap.add_argument("--pick", choices=_VALID_PICKS, default="worst",
+    ap.add_argument("--pick", default="worst",
                     help="selection strategy: worst / best / median / "
-                    "random (default: worst, matches the legacy "
-                    "viz_worst_cases behavior)")
+                    "random. Accepts a COMMA LIST (e.g. "
+                    "'worst,best,median,random'); each mode runs its "
+                    "own selection but predict_run_fields is called "
+                    "ONCE on the union of needed indices, saving a "
+                    "load_dataset + inference per extra mode. Single "
+                    "value writes files directly under --out; comma "
+                    "list writes each mode into --out/<mode>/. "
+                    "Default: worst (legacy behavior).")
     ap.add_argument("--sim", default=None,
                     help="comma list of specific sim basenames to "
                     "render (overrides --pick and --topn). Basenames "
@@ -453,25 +459,11 @@ def main() -> int:
               file=sys.stderr)
         return 1
 
-    # Resolve selection: --sim wins, else --pick.
-    sim_list = None
-    if args.sim:
-        sim_list = [s.strip() for s in args.sim.split(",") if s.strip()]
-        picked_indices, picked_names = _resolve_sim_basenames(
-            basenames, sim_list)
-        label = f"--sim ({len(sim_list)} names, {len(picked_indices)} hit)"
-    else:
-        picked_indices = _pick_indices(field_errs, args.pick,
-                                        args.topn, args.seed)
-        picked_names = [basenames[i] for i in picked_indices]
-        label = (f"--pick {args.pick} --topn {args.topn}"
-                 + (f" --seed {args.seed}" if args.pick == "random" else ""))
-    print(f"selection: {label}  ({len(picked_indices)} sim(s) to render):")
-    for j in picked_indices:
-        print(f"  test_idx={int(j):4d}  rel_l2={field_errs[j]:.4f}  "
-              f"{basenames[j]}")
-
-    # Cache key encodes (pick, topn, seed) OR --sim basenames.
+    # ---- Resolve every selection up front ---------------------------
+    # Each selection is a dict: {name, label, indices, sel_key,
+    #                             cache_path, cache: hit-or-None}.
+    # Selections come from --pick (a comma list of modes) plus an
+    # optional --sim override that adds one more explicit selection.
     from evaluation.run_predict import predict_run_fields, load_run_config
     overrides = {}
     if args.data_dir_override:
@@ -480,103 +472,166 @@ def main() -> int:
                           overrides=overrides)
     ckpt_fp = _checkpoint_fingerprint(args.output_dir, args.tag,
                                         list(cfg.seeds))
-    sel_key = _selection_key(
-        args.pick if not sim_list else None,
-        args.topn if not sim_list else None,
-        args.seed if (not sim_list and args.pick == "random") else None,
-        picked_names if sim_list else None)
-    cache_path = _test_cache_path(args.output_dir, args.tag,
-                                    ckpt_fp, sel_key)
-    out = (None if (args.no_cache or args.force)
-           else _load_test_cache(cache_path))
-    if out is not None:
-        print(f"test-cases cache HIT -> {cache_path.name}  "
-              f"({len(out['idx'])} sim(s), K={out['K']})", flush=True)
-    else:
-        if cache_path.exists() and args.no_cache:
-            print(f"  --no-cache: skipping {cache_path.name}",
-                  flush=True)
-        print(f"test-cases cache MISS -> running predict_run_fields "
-              f"(93 GB load + inference)", flush=True)
-        t0 = time.time()
-        out = predict_run_fields(args.tag,
-                                  idx=picked_indices.tolist(),
-                                  output_dir=args.output_dir,
-                                  overrides=overrides, verbose=True,
-                                  basis_override_path=args.basis_file)
-        print(f"  predict_run_fields done in "
-              f"{time.time() - t0:.1f}s", flush=True)
-        try:
-            _save_test_cache(cache_path, out)
-            print(f"  wrote test-cases cache -> {cache_path.name} "
-                  f"(~{(cache_path.stat().st_size >> 20)} MB)",
-                  flush=True)
-        except OSError as e:
-            print(f"  WARN: could not write test-cases cache "
-                  f"({type(e).__name__}: {e}); continuing anyway",
-                  flush=True)
-    x_canon = out["x_canon"]; y_canon = out["y_canon"]
-    K = out["K"]
-    t = out["t"]
-    sensor_xy = out["sensor_xy"]
 
-    out_dir = Path(args.out).expanduser().resolve()
-    out_dir.mkdir(parents=True, exist_ok=True)
+    selections = []
+    pick_list = [p.strip() for p in args.pick.split(",") if p.strip()]
+    unknown = [p for p in pick_list if p not in _VALID_PICKS]
+    if unknown:
+        print(f"unknown --pick mode(s): {unknown}; valid: "
+              f"{list(_VALID_PICKS)}", file=sys.stderr)
+        return 2
+    for p in pick_list:
+        indices = _pick_indices(field_errs, p, args.topn, args.seed)
+        names = [basenames[i] for i in indices]
+        label = (f"--pick {p} --topn {args.topn}"
+                 + (f" --seed {args.seed}" if p == "random" else ""))
+        sel_key = _selection_key(
+            p, args.topn,
+            args.seed if p == "random" else None,
+            None)
+        cache_path = _test_cache_path(args.output_dir, args.tag,
+                                        ckpt_fp, sel_key)
+        selections.append(dict(name=p, label=label, indices=indices,
+                                 names=names, sel_key=sel_key,
+                                 cache_path=cache_path))
+    if args.sim:
+        sim_list = [s.strip() for s in args.sim.split(",") if s.strip()]
+        picked_indices, picked_names = _resolve_sim_basenames(
+            basenames, sim_list)
+        label = (f"--sim ({len(sim_list)} names, "
+                 f"{len(picked_indices)} hit)")
+        sel_key = _selection_key(None, None, None, picked_names)
+        cache_path = _test_cache_path(args.output_dir, args.tag,
+                                        ckpt_fp, sel_key)
+        selections.append(dict(name="sim", label=label,
+                                 indices=picked_indices,
+                                 names=picked_names, sel_key=sel_key,
+                                 cache_path=cache_path))
+
+    multi_sel = len(selections) > 1
+    print(f"total selections: {len(selections)}", flush=True)
+    for s in selections:
+        print(f"  [{s['name']}] {s['label']}: "
+              f"{len(s['indices'])} sim(s)", flush=True)
+        for j in s["indices"]:
+            print(f"    test_idx={int(j):4d}  rel_l2="
+                  f"{field_errs[j]:.4f}  {basenames[j]}", flush=True)
+
+    # ---- Cache check for each selection ----------------------------
+    for s in selections:
+        s["cache"] = (None if (args.no_cache or args.force)
+                       else _load_test_cache(s["cache_path"]))
+        if s["cache"] is not None:
+            print(f"  [{s['name']}] cache HIT -> "
+                  f"{s['cache_path'].name}", flush=True)
+
+    # ---- If any selection missed, ONE batch call ---------------------
+    miss = [s for s in selections if s["cache"] is None]
+    if miss:
+        union_idx = sorted({int(i) for s in miss for i in s["indices"]})
+        print(f"\n{len(miss)}/{len(selections)} selection(s) missed "
+              f"cache; batching predict_run_fields ONCE for "
+              f"{len(union_idx)} union index(es)", flush=True)
+        t0 = time.time()
+        batch = predict_run_fields(
+            args.tag, idx=union_idx,
+            output_dir=args.output_dir,
+            overrides=overrides, verbose=True,
+            basis_override_path=args.basis_file)
+        print(f"  batch predict_run_fields done in "
+              f"{time.time() - t0:.1f}s", flush=True)
+        idx_to_slot = {int(v): i for i, v in enumerate(batch["idx"])}
+        # Split into per-selection subsets and cache each.
+        for s in miss:
+            slots = [idx_to_slot[int(i)] for i in s["indices"]]
+            sub = dict(
+                x_canon=batch["x_canon"], y_canon=batch["y_canon"],
+                t=batch["t"], sensor_xy=batch["sensor_xy"],
+                K=batch["K"],
+                idx=np.asarray([int(batch["idx"][j])
+                                 for j in slots], dtype=int),
+                w_pred=batch["w_pred"][slots],
+                w_true=batch["w_true"][slots],
+                a_pred=batch["a_pred"][slots],
+                a_true=batch["a_true"][slots],
+                basenames=[batch["basenames"][j] for j in slots])
+            try:
+                _save_test_cache(s["cache_path"], sub)
+                print(f"  [{s['name']}] wrote cache -> "
+                      f"{s['cache_path'].name} "
+                      f"(~{(s['cache_path'].stat().st_size >> 20)} MB)",
+                      flush=True)
+            except OSError as e:
+                print(f"  [{s['name']}] WARN: could not write cache "
+                      f"({type(e).__name__}: {e})", flush=True)
+            s["cache"] = sub
+
+    # ---- Render every selection --------------------------------------
+    out_dir_root = Path(args.out).expanduser().resolve()
+    out_dir_root.mkdir(parents=True, exist_ok=True)
 
     import matplotlib
     matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
+    import matplotlib.pyplot as plt  # noqa: F401 (used by helpers)
 
     kymo_angles = [float(a) for a in args.kymo_angles.split(",")
                     if a.strip()]
     want_snapshot = args.layout in ("snapshot", "both")
     want_kymo = args.layout in ("kymo", "both")
 
-    for slot, test_idx in enumerate(out["idx"]):
-        # w_true / w_pred are in physical units (metres). The snapshot
-        # helper multiplies by value_scale internally (values render
-        # scaled and the colorbar labels reflect that). The kymo helper
-        # takes metres directly and does the same.
-        gt = out["w_true"][slot] * args.value_scale
-        pr = out["w_pred"][slot] * args.value_scale
-        err = np.abs(gt - pr)
-        bname = out["basenames"][slot]
-        rel_l2 = float(field_errs[test_idx])
-        # Filename: <slot>_relL2<val>_<basename>.png (kymo variant adds
-        # a _kymo suffix). Slot prefix avoids ties when two sims share
-        # a basename root.
-        stem = Path(bname).stem if bname else f"test{int(test_idx)}"
-        base_name = f"{slot:04d}_relL2{rel_l2:.4f}_{stem}"
+    total_files = 0
+    for s in selections:
+        out_data = s["cache"]
+        # Multi-selection: each into its own subdir. Single: legacy
+        # behavior, files directly in --out (backward-compat).
+        this_dir = (out_dir_root / s["name"]) if multi_sel else out_dir_root
+        this_dir.mkdir(parents=True, exist_ok=True)
+        for slot, test_idx in enumerate(out_data["idx"]):
+            gt = out_data["w_true"][slot] * args.value_scale
+            pr = out_data["w_pred"][slot] * args.value_scale
+            err = np.abs(gt - pr)
+            bname = out_data["basenames"][slot]
+            rel_l2 = float(field_errs[int(test_idx)])
+            stem = Path(bname).stem if bname else f"test{int(test_idx)}"
+            base_name = f"{slot:04d}_relL2{rel_l2:.4f}_{stem}"
 
-        if want_snapshot:
-            snap_out = out_dir / f"{base_name}.png"
-            _render_snapshot(
-                snap_out,
-                gt=gt, pr=pr, err=err,
-                a_pred=out["a_pred"][slot], a_true=out["a_true"][slot],
-                t=t, K=K,
-                x_canon=x_canon, y_canon=y_canon,
-                sensor_xy=sensor_xy,
-                sim_id=bname, tag=args.tag,
-                rel_l2=rel_l2, test_idx=int(test_idx),
-                sel_label=label, results_path=results_path)
-            print(f"  wrote {snap_out}", flush=True)
-        if want_kymo:
-            kymo_out = out_dir / f"{base_name}_kymo.png"
-            _render_kymo_compare(
-                kymo_out,
-                w_true_m=out["w_true"][slot],
-                w_pred_m=out["w_pred"][slot],
-                x_canon=x_canon, y_canon=y_canon,
-                angles=kymo_angles,
-                sim_id=bname, tag=args.tag,
-                rel_l2=rel_l2, test_idx=int(test_idx),
-                sel_label=label, results_path=results_path,
-                value_scale=args.value_scale)
-            print(f"  wrote {kymo_out}", flush=True)
+            if want_snapshot:
+                snap_out = this_dir / f"{base_name}.png"
+                _render_snapshot(
+                    snap_out,
+                    gt=gt, pr=pr, err=err,
+                    a_pred=out_data["a_pred"][slot],
+                    a_true=out_data["a_true"][slot],
+                    t=out_data["t"], K=out_data["K"],
+                    x_canon=out_data["x_canon"],
+                    y_canon=out_data["y_canon"],
+                    sensor_xy=out_data["sensor_xy"],
+                    sim_id=bname, tag=args.tag,
+                    rel_l2=rel_l2, test_idx=int(test_idx),
+                    sel_label=s["label"],
+                    results_path=results_path)
+                print(f"  wrote {snap_out}", flush=True)
+                total_files += 1
+            if want_kymo:
+                kymo_out = this_dir / f"{base_name}_kymo.png"
+                _render_kymo_compare(
+                    kymo_out,
+                    w_true_m=out_data["w_true"][slot],
+                    w_pred_m=out_data["w_pred"][slot],
+                    x_canon=out_data["x_canon"],
+                    y_canon=out_data["y_canon"],
+                    angles=kymo_angles,
+                    sim_id=bname, tag=args.tag,
+                    rel_l2=rel_l2, test_idx=int(test_idx),
+                    sel_label=s["label"],
+                    results_path=results_path,
+                    value_scale=args.value_scale)
+                print(f"  wrote {kymo_out}", flush=True)
+                total_files += 1
 
-    n_out = len(out["idx"]) * (int(want_snapshot) + int(want_kymo))
-    print(f"\nall {n_out} test-case figure(s) -> {out_dir}", flush=True)
+    print(f"\nall {total_files} test-case figure(s) across "
+          f"{len(selections)} selection(s) -> {out_dir_root}",
+          flush=True)
     return 0
 
 
