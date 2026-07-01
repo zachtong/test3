@@ -120,6 +120,75 @@ def test_bonded_mask_rule_3_monotonic_in_time():
     assert (diff >= 0).all(), "bonded mask should never retreat in time"
 
 
+def test_worst_cache_roundtrip(tmp_path):
+    """Worst-cases cache: write then read must be faithful across all
+    fields (idx, K, w_pred, w_true, a_pred, a_true, basenames). Guards
+    against schema drift where the reader forgets a field the writer
+    stored -- silently under-reporting the top-N."""
+    from scripts.viz_worst_cases import (
+        _save_worst_cache, _load_worst_cache, _worst_cache_path)
+
+    tag_dir = tmp_path / "outputs" / "sometag"
+    tag_dir.mkdir(parents=True)
+    rng = np.random.default_rng(0)
+    payload = dict(
+        x_canon=np.linspace(0, 1, 8),
+        y_canon=np.linspace(0, 1, 8),
+        t=np.linspace(0, 1, 4),
+        sensor_xy=np.array([[1.0, 0.0], [0.0, 1.0]]),
+        K=3,
+        idx=[7, 12, 3, 99, 5],
+        w_pred=rng.standard_normal((5, 8, 8, 4)) * 1e-6,
+        w_true=rng.standard_normal((5, 8, 8, 4)) * 1e-6,
+        a_pred=rng.standard_normal((5, 3, 4)),
+        a_true=rng.standard_normal((5, 3, 4)),
+        basenames=["sim_a.npz", "sim_b.npz", "sim_c.npz",
+                    "sim_d.npz", "sim_e.npz"])
+
+    path = _worst_cache_path(str(tmp_path / "outputs"),
+                              "sometag", 5, "deadbeef1234")
+    _save_worst_cache(path, payload)
+    hit = _load_worst_cache(path)
+    assert hit is not None
+    assert hit["K"] == 3
+    assert list(hit["idx"]) == [7, 12, 3, 99, 5]
+    assert hit["basenames"] == payload["basenames"]
+    # float32 round-trip tolerance
+    for k in ("w_pred", "w_true", "a_pred", "a_true"):
+        assert np.allclose(hit[k], payload[k], atol=1e-9), \
+            f"{k} did not roundtrip"
+    assert np.array_equal(hit["sensor_xy"], payload["sensor_xy"])
+
+
+def test_worst_cache_path_encodes_topn_and_fingerprint(tmp_path):
+    """Different topn OR different checkpoint fingerprint must yield
+    a different cache file so a retrain does not clobber the pre-
+    retrain cache, and topn=5 vs topn=10 do not collide."""
+    from scripts.viz_worst_cases import _worst_cache_path
+    base = _worst_cache_path(str(tmp_path), "tag", 5, "aaaaaaaa")
+    assert base != _worst_cache_path(str(tmp_path), "tag", 10, "aaaaaaaa")
+    assert base != _worst_cache_path(str(tmp_path), "tag", 5, "bbbbbbbb")
+    # Same key -> same path (idempotence).
+    assert base == _worst_cache_path(str(tmp_path), "tag", 5, "aaaaaaaa")
+
+
+def test_worst_cache_rejects_stale_version(tmp_path):
+    from scripts.viz_worst_cases import (_load_worst_cache,
+                                            _worst_cache_path)
+    path = _worst_cache_path(str(tmp_path), "tag", 5, "aa")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    np.savez(path, version=np.int32(-999),
+             x_canon=np.zeros(4), y_canon=np.zeros(4),
+             t=np.zeros(2), sensor_xy=np.zeros((1, 2)),
+             K=np.int32(1), idx=np.zeros(1, dtype=np.int64),
+             w_pred=np.zeros((1, 4, 4, 2), dtype=np.float32),
+             w_true=np.zeros((1, 4, 4, 2), dtype=np.float32),
+             a_pred=np.zeros((1, 1, 2), dtype=np.float32),
+             a_true=np.zeros((1, 1, 2), dtype=np.float32),
+             basenames_json=np.array('["sim_a.npz"]'))
+    assert _load_worst_cache(path) is None
+
+
 def test_diversity_stats_cache_roundtrip(tmp_path):
     """Diversity cache: write then read must return identical (mean, var,
     n_eff, axes). Guards against silent schema drift where the reader

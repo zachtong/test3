@@ -15,10 +15,15 @@ informative single snapshot to render. Files are named with the
 per-sim rel-L2 + sim basename so they sort naturally:
   worst_<rel_l2>__<sim_basename>.png
 
-Heavyweight: this script LOADS the dataset, rebuilds the split,
-re-fits / cache-hits the POD basis, loads the 3 seed checkpoints,
-runs inference. Cost ~1-2 minutes after caches are warm; ~5-30
-minutes cold.
+FIRST RUN is heavyweight: load dataset (93 GB), rebuild split, load
+basis, load 3 seed checkpoints, run inference. Cost ~1-2 minutes
+after loader cache warm, ~5-30 minutes cold.
+
+RE-RUNS ARE FAST via the worst-cases cache: a hit reads pre-computed
+(w_pred, w_true, a_pred, a_true) tensors for the top-N sims from
+outputs/<tag>/_worst_top<N>_<ckpt_hash>.npz (~100 MB) and renders in
+seconds. The cache key includes the sha of the seed checkpoint files
+so retraining auto-invalidates.
 
     python scripts/viz_worst_cases.py --tag firehorse2_n3_full \\
         --topn 5 --out viz/worst/
@@ -26,8 +31,10 @@ minutes cold.
 
 from __future__ import annotations
 import argparse
+import hashlib
 import json
 import sys
+import time
 from pathlib import Path
 
 import numpy as np
@@ -39,6 +46,81 @@ if str(_root) not in sys.path:
 from scripts.fieldviz import (render_full_disk, provenance_footer,  # noqa: E402
                                WAFER_CMAP, SENSOR_MARKER_COLOR,
                                wafer_value_range)
+
+
+_WORST_CACHE_PREFIX = "_worst_top"
+_WORST_CACHE_VERSION = 1
+
+
+def _checkpoint_fingerprint(output_dir: str, tag: str,
+                             seeds: list) -> str:
+    """Sha of the seed checkpoint files' (size, mtime). Cheap and
+    triggers cache invalidation whenever any checkpoint changes."""
+    from training.checkpoint import checkpoint_path
+    parts = []
+    for seed in sorted(seeds):
+        cp = checkpoint_path(output_dir, tag, seed)
+        if cp.exists():
+            st = cp.stat()
+            parts.append(f"{seed}:{st.st_size}:{int(st.st_mtime)}")
+        else:
+            parts.append(f"{seed}:missing")
+    if not parts:
+        return "no_checkpoints"
+    return hashlib.sha256("|".join(parts).encode()).hexdigest()[:12]
+
+
+def _worst_cache_path(output_dir: str, tag: str, topn: int,
+                     ckpt_fp: str) -> Path:
+    return (Path(output_dir) / tag /
+            f"{_WORST_CACHE_PREFIX}{topn}_{ckpt_fp}.npz")
+
+
+def _load_worst_cache(path: Path):
+    """Return a predict_run_fields-shaped dict on hit, None on miss."""
+    if not path.is_file():
+        return None
+    try:
+        with np.load(path, allow_pickle=False) as d:
+            if int(d.get("version", -1)) != _WORST_CACHE_VERSION:
+                return None
+            return dict(
+                x_canon=d["x_canon"], y_canon=d["y_canon"],
+                t=d["t"], sensor_xy=d["sensor_xy"],
+                K=int(d["K"]),
+                idx=d["idx"].astype(int),
+                w_pred=d["w_pred"].astype(np.float64),
+                w_true=d["w_true"].astype(np.float64),
+                a_pred=d["a_pred"].astype(np.float64),
+                a_true=d["a_true"].astype(np.float64),
+                basenames=json.loads(str(d["basenames_json"])))
+    except (OSError, ValueError, KeyError) as e:
+        print(f"  worst cache read failed "
+              f"({type(e).__name__}: {e}) -- rebuilding",
+              flush=True)
+        return None
+
+
+def _save_worst_cache(path: Path, payload: dict) -> None:
+    """Atomic write. Fields stored float32 to keep the file ~100 MB
+    for topn=5 on 128x128x300; loader auto-promotes to float64."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".tmp.npz")
+    np.savez(
+        tmp,
+        version=np.int32(_WORST_CACHE_VERSION),
+        x_canon=payload["x_canon"].astype(np.float64),
+        y_canon=payload["y_canon"].astype(np.float64),
+        t=payload["t"].astype(np.float64),
+        sensor_xy=payload["sensor_xy"].astype(np.float64),
+        K=np.int32(payload["K"]),
+        idx=np.asarray(payload["idx"], dtype=np.int64),
+        w_pred=payload["w_pred"].astype(np.float32),
+        w_true=payload["w_true"].astype(np.float32),
+        a_pred=payload["a_pred"].astype(np.float32),
+        a_true=payload["a_true"].astype(np.float32),
+        basenames_json=np.array(json.dumps(list(payload["basenames"]))))
+    tmp.replace(path)
 
 
 def main() -> int:
@@ -55,6 +137,13 @@ def main() -> int:
                     help="override --data.npz_dir (e.g. when running on "
                     "a different machine than training)")
     ap.add_argument("--value-scale", type=float, default=1.0e6)
+    ap.add_argument("--no-cache", action="store_true",
+                    help="ignore the worst-cases prediction cache and "
+                    "re-run predict_run_fields (93 GB load + inference). "
+                    "Use if you suspect the cache is stale.")
+    ap.add_argument("--force", action="store_true",
+                    help="rebuild AND overwrite the worst-cases cache "
+                    "even on a valid hit. Implies --no-cache.")
     args = ap.parse_args()
 
     # Locate per-sim errors via results.json and pick top-N worst by rel-L2.
@@ -79,14 +168,47 @@ def main() -> int:
         print(f"  test_idx={int(j):4d}  rel_l2={field_errs[j]:.4f}  "
               f"{basenames[j]}")
 
-    # Predict + reconstruct
-    from evaluation.run_predict import predict_run_fields
+    # Try the worst-cases cache first. Its key includes the checkpoint
+    # fingerprint (size + mtime of each seed's .pt file) so a retrain
+    # automatically invalidates. If topn changes, the file NAME
+    # changes (different suffix), so both caches can coexist for
+    # different N values.
+    from evaluation.run_predict import predict_run_fields, load_run_config
     overrides = {}
     if args.data_dir_override:
         overrides["data.npz_dir"] = args.data_dir_override
-    out = predict_run_fields(args.tag, idx=worst_indices.tolist(),
-                             output_dir=args.output_dir,
-                             overrides=overrides, verbose=True)
+    cfg = load_run_config(args.tag, output_dir=args.output_dir,
+                          overrides=overrides)
+    ckpt_fp = _checkpoint_fingerprint(args.output_dir, args.tag,
+                                        list(cfg.seeds))
+    cache_path = _worst_cache_path(args.output_dir, args.tag,
+                                    args.topn, ckpt_fp)
+    out = (None if (args.no_cache or args.force)
+           else _load_worst_cache(cache_path))
+    if out is not None:
+        print(f"worst-cases cache HIT -> {cache_path.name}  "
+              f"(topn={args.topn}, K={out['K']})", flush=True)
+    else:
+        if cache_path.exists() and args.no_cache:
+            print(f"  --no-cache: skipping {cache_path.name}",
+                  flush=True)
+        print(f"worst-cases cache MISS -> running predict_run_fields "
+              f"(93 GB load + inference)", flush=True)
+        t0 = time.time()
+        out = predict_run_fields(args.tag, idx=worst_indices.tolist(),
+                                  output_dir=args.output_dir,
+                                  overrides=overrides, verbose=True)
+        print(f"  predict_run_fields done in "
+              f"{time.time() - t0:.1f}s", flush=True)
+        try:
+            _save_worst_cache(cache_path, out)
+            print(f"  wrote worst-cases cache -> {cache_path.name} "
+                  f"(~{(cache_path.stat().st_size >> 20)} MB)",
+                  flush=True)
+        except OSError as e:
+            print(f"  WARN: could not write worst-cases cache "
+                  f"({type(e).__name__}: {e}); continuing anyway",
+                  flush=True)
     x_canon = out["x_canon"]; y_canon = out["y_canon"]
     K = out["K"]
     t = out["t"]

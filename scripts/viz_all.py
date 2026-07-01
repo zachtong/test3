@@ -201,6 +201,13 @@ def main() -> int:
                     "hit skips the giant read. Use this only when you "
                     "suspect the cache is stale (folder changed, npz "
                     "files added/removed without a rename).")
+    ap.add_argument("--rebuild-worst-cache", action="store_true",
+                    help="force viz_worst_cases to re-run "
+                    "predict_run_fields (93 GB load + inference) and "
+                    "overwrite its cache. The cache invalidates "
+                    "automatically on retrain via a checkpoint "
+                    "fingerprint; use this flag only when you know "
+                    "the cache is wrong for some other reason.")
     ap.add_argument("--show-lower", action="store_true",
                     help="draw the flat lower-wafer reference plane on "
                     "all 3D viz (gif_3d, strip_3d, interactive). "
@@ -512,6 +519,8 @@ def main() -> int:
                    "--output-dir", args.output_dir]
             if args.npz_dir:
                 cmd += ["--data-dir-override", str(folder)]
+            if args.rebuild_worst_cache:
+                cmd += ["--force"]
             _run(cmd, worst_dir / "DUMMY", args.force, log)
             # ^ DUMMY target ensures _run never sees an existing file;
             # we already gated above
