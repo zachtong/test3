@@ -21,12 +21,15 @@ subprocess.run([
 ], check=True)
 
 # --- 2. viz_all ---
+# Skip the interactive HTML: it needs WebGL to view (broken on this
+# Linux) and gif_3d + radial_anim + kymo cover the same info.
 subprocess.run([
     PY, "scripts/viz_all.py",
     "--npz-dir", "/data/3D_wafer_bonding/sim_dataset_big_firehorse_1_and_2/",
     "--out", "viz/firehorse1_and_2_clean",
     "--tag", "firehorse1_and_2_clean",
     "--show-lower",
+    "--exclude", "interactive",
 ], check=True)
 
 # --- 3. viz_test_cases ---
@@ -36,5 +39,5 @@ subprocess.run([
     "--out", "viz/firehorse1_and_2_clean/all_picks/",
     "--pick", "worst,best,median,random",
     "--topn", "10",
-    "--layout", "kymo,radial_anim",
+    "--layout", "snapshot,kymo,radial_anim",
 ], check=True)
