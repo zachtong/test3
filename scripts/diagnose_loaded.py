@@ -12,7 +12,7 @@ mid-trajectory native indices. The question is then whether:
       genuinely has non-zero values at canonical mid-time (so the
       snapshot's all-zero middle frame is a RENDERING bug -- shared
       vmin/vmax across all three frames squashes anything below the
-      last frame's peak into the bottom of the colour scale and it
+      last frame's peak into the bottom of the color scale and it
       looks black), or
   (B) `_canonicalize` is producing a canonical field that IS zero at
       mid-time (so the bug is upstream: time-resampling collapses
@@ -158,7 +158,7 @@ def diagnose(path: Path, nx: int, ny: int, nt: int,
         print("  near-black even though the data is there. This is a")
         print("  RENDERING bug (cosmetic). _canonicalize is fine.")
         print("  Fix: render each frame with its own vmin/vmax, or")
-        print("  use percentile clipping on the colour scale.")
+        print("  use percentile clipping on the color scale.")
         return 3
     print("\n  Middle frame has >5% of the peak; the snapshot should be")
     print("  visible. If the user reports it as all-black, suspect a")

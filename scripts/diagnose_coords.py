@@ -157,23 +157,23 @@ def diagnose(path: Path) -> int:
     print(f"  observed max(|x|, |y|) on step 0 upper = {biggest_axis:.6g}")
     tol = 0.05
     if abs(biggest_axis - _ASSUMED_R_METRES) < _ASSUMED_R_METRES * tol:
-        print(f"  -> matches PHYSICAL METRES (R = {_ASSUMED_R_METRES} m) "
+        print(f"  -> matches PHYSICAL METERS (R = {_ASSUMED_R_METRES} m) "
               f"within {tol*100:.0f}%.")
-        print(f"     This is the EXPECTED format. The loader normalises "
+        print(f"     This is the EXPECTED format. The loader normalizes "
               f"native coords by R = {_ASSUMED_R_METRES} m so the "
               f"canonical [0, 1] grid covers the full quarter-disk.")
         return 0
     if abs(biggest_axis - 1.0) < 0.05:
-        print("  -> matches NORMALISED coordinates (~1.0).")
-        print("     WARNING: the loader expects raw metres and will divide "
+        print("  -> matches NORMALIZED coordinates (~1.0).")
+        print("     WARNING: the loader expects raw meters and will divide "
               f"by R = {_ASSUMED_R_METRES} m again, leading to "
-              f"double-normalisation. The converter has changed its "
-              f"contract -- either drop the converter-side normalisation "
+              f"double-normalization. The converter has changed its "
+              f"contract -- either drop the converter-side normalization "
               f"or remove the loader-side divide.")
         return 2
     print(f"  -> does not match either ~{_ASSUMED_R_METRES} m or ~1.0; "
           f"observed {biggest_axis:.6g}.")
-    print("     Possible: coords in millimetres, micrometres, or some "
+    print("     Possible: coords in millimeters, micrometers, or some "
           "other unit. Investigate the converter output before continuing.")
     return 3
 

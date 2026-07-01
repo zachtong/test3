@@ -1,4 +1,4 @@
-"""Cross-sim STD visualisation: how diverse is a folder of NPZ sims?
+"""Cross-sim STD visualization: how diverse is a folder of NPZ sims?
 
 Computes std across simulations of the canonical (Nx, Ny, Nt)
 displacement field via Welford's one-pass mean-variance algorithm
@@ -14,14 +14,14 @@ Two views of the result, one figure:
     diversity image against any one sim's hero kymograph.
 
   BOTTOM ROW (3 panels): top-down snapshots of std(x, y, t) at
-    t = 0.1, 0.5, 0.9 of the normalised trajectory. Full disk
+    t = 0.1, 0.5, 0.9 of the normalized trajectory. Full disk
     (D2-mirrored). Viridis. Tells the operator WHERE in space the
     sample-to-sample variance is concentrated and how it migrates
     over time.
 
-The bottom row's three panels use a SHARED viridis colour scale so
+The bottom row's three panels use a SHARED viridis color scale so
 the eye can compare "is the dataset's variance front-dominated /
-edge-dominated / centre-dominated, and does that change over time?"
+edge-dominated / center-dominated, and does that change over time?"
 
 Use --limit N to subsample the folder while iterating.
 
@@ -193,7 +193,7 @@ def main() -> int:
     ap.add_argument("--drop-first-steps", type=int, default=1)
     ap.add_argument("--angles", default="0,45,90")
     ap.add_argument("--snapshot-times", default="0.1,0.5,0.9",
-                    help="comma list of normalised t in [0, 1] for "
+                    help="comma list of normalized t in [0, 1] for "
                     "the bottom-row top-down snapshots")
     ap.add_argument("--value-scale", type=float, default=1.0e6,
                     help="multiply std for display (1e6 m -> um)")
@@ -304,9 +304,9 @@ def main() -> int:
                        vmin=0, vmax=vmax, cmap="viridis",
                        interpolation="nearest")
         ax.set_title(f"std kymograph @ theta={th:g} deg", fontsize=10)
-        ax.set_xlabel("normalised time")
+        ax.set_xlabel("normalized time")
         if c == 0:
-            ax.set_ylabel("r (normalised)")
+            ax.set_ylabel("r (normalized)")
     # Single colorbar for the top row
     fig.colorbar(im, ax=axes[0, :].tolist(), shrink=0.85,
                  location="right",

@@ -59,7 +59,7 @@ def main() -> int:
                     "manageable; evenly subsampled from Nt (default 60)")
     ap.add_argument("--value-scale", type=float, default=1.0e6,
                     help="multiply displacement for display (default 1e6 "
-                    "= metres -> micrometres)")
+                    "= meters -> micrometers)")
     ap.add_argument("--sensors", default="3-edge",
                     help="'3-edge' (lab rig) or 'r:th,r:th,...'")
     ap.add_argument("--show-lower", action="store_true",
@@ -68,7 +68,7 @@ def main() -> int:
                     "Toggle via the legend in the rendered HTML.")
     ap.add_argument("--lower-z", type=float, default=None,
                     help="override the auto-estimated lower wafer z "
-                    "(in metres; only used with --show-lower)")
+                    "(in meters; only used with --show-lower)")
     ap.add_argument("--tag", default=None)
     args = ap.parse_args()
 
@@ -143,11 +143,11 @@ def main() -> int:
         full = full.astype(np.float64)
         full[~in_disk] = np.nan
         z_frames.append(full)
-    # Asymmetric colour range matching the WAFER_CMAP sequential
+    # Asymmetric color range matching the WAFER_CMAP sequential
     # palette (purple=most negative, yellow=zero/rest).
     finite = np.concatenate([zf[np.isfinite(zf)].ravel() for zf in z_frames])
     vmin, vmax = wafer_value_range(finite)
-    print(f"  colour range [{vmin:.3g}, {vmax:.3g}] (1-99 pct, "
+    print(f"  color range [{vmin:.3g}, {vmax:.3g}] (1-99 pct, "
           f"clipped to <= 0 at top)", flush=True)
     wafer_scale = wafer_cmap_to_plotly()
 
@@ -231,8 +231,8 @@ def main() -> int:
                           front_r[int(frame_idx[0])],
                           sim_path.name, args.gap_threshold_um),
         scene=dict(
-            xaxis_title="x (normalised, r=1 at wafer edge)",
-            yaxis_title="y (normalised)",
+            xaxis_title="x (normalized, r=1 at wafer edge)",
+            yaxis_title="y (normalized)",
             zaxis_title=f"u_z * {args.value_scale:g}",
             aspectmode="manual",
             aspectratio=dict(x=1, y=1, z=0.4),

@@ -1,4 +1,4 @@
-"""Visualise the top-N worst test sims for failure-mode triage.
+"""Visualize the top-N worst test sims for failure-mode triage.
 
 Per worst sim: one PNG containing
   TOP ROW (3 full-disk heatmaps at t*):
@@ -234,7 +234,7 @@ def main() -> int:
         err_integrated = err.sum(axis=(0, 1))
         t_star = int(np.argmax(err_integrated))
 
-        # Shared sequential colour scale for GT + pred (so the visual
+        # Shared sequential color scale for GT + pred (so the visual
         # comparison is valid). Error panel gets its own viridis range.
         vmin, vmax = wafer_value_range(
             np.stack([gt[..., t_star], pr[..., t_star]]))
@@ -277,7 +277,7 @@ def main() -> int:
             ax.set_title(f"a_{k_idx + 1}  rel-L2={err_k:.3f}",
                          fontsize=9)
             ax.grid(alpha=0.3)
-            ax.set_xlabel("normalised t")
+            ax.set_xlabel("normalized t")
             if c == 0:
                 ax.legend(fontsize=7, loc="best")
         for c in range(K, n_cols):

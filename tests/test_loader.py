@@ -228,7 +228,7 @@ def test_nearest_fill_recovers_axis_strip(tmp_path):
 
 
 def test_field_covers_full_quarter_disk(tmp_path):
-    """Regression: native coord -> canonical grid normalisation must cover
+    """Regression: native coord -> canonical grid normalization must cover
     the WHOLE quarter-disk, not just the (0..R) corner.
 
     Before the loader divided native coords by R, the Delaunay triangulation
@@ -252,7 +252,7 @@ def test_field_covers_full_quarter_disk(tmp_path):
     assert np.isfinite(last_t)
     assert abs(last_t) > 1e-4, (
         f"field at canonical (0.5, 0.5) at last time = {last_t}; "
-        f"expected non-trivial signal. Coord normalisation regressed?")
+        f"expected non-trivial signal. Coord normalization regressed?")
     # And the edge (1.0, 0.0) which sits on the quarter-disk boundary
     # also needs to be reachable -- this is where the rig sensor lives.
     edge = f[-1, 0, -1]

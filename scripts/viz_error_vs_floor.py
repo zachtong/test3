@@ -17,7 +17,7 @@ Three regions of the scatter tell different stories:
                                 the K-mode basis cannot describe?
                                 check for a bug)
 
-The colour-by-max|a_6| variant directly tests the per-mode-error
+The color-by-max|a_6| variant directly tests the per-mode-error
 hypothesis: if a_6 mispredictions dominate per-sim error, those points
 will be the bright ones.
 
@@ -52,9 +52,9 @@ def main() -> int:
                     help="path to outputs/<tag>/results.json")
     ap.add_argument("--out", required=True)
     ap.add_argument("--color-by", default="none",
-                    help="'none' (single colour), 'a_<k>' (colour by "
+                    help="'none' (single color), 'a_<k>' (color by "
                     "that mode's predicted-vs-true rel-L2 per sim), or "
-                    "'all_modes_max' (colour by max across all modes)")
+                    "'all_modes_max' (color by max across all modes)")
     ap.add_argument("--tag", default=None)
     args = ap.parse_args()
 
@@ -81,7 +81,7 @@ def main() -> int:
     print(f"loaded {n} sims  med field {median_field:.4f}  "
           f"med floor {median_floor:.4f}  gap {gap:.2f}x")
 
-    # --- colour mapping ---
+    # --- color mapping ---
     color_vals = None
     color_label = None
     if args.color_by != "none":

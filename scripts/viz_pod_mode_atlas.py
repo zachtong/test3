@@ -2,7 +2,7 @@
 
 Each panel shows one POD basis function reshaped to (Nx, Ny), D2-
 mirrored to the full disk, with a circular off-disk mask. Per-panel
-normalisation so weak modes (low sigma) are still readable; this
+normalization so weak modes (low sigma) are still readable; this
 trades amplitude legibility for STRUCTURE legibility -- the talk
 audience cares about "what does the spatial pattern look like" more
 than "how big is mode 6 vs mode 1".
@@ -47,14 +47,14 @@ def main() -> int:
                     help="number of modes to render (default 8). Must "
                     "be <= k_cache stored in the basis file.")
     ap.add_argument("--per-panel-norm", action="store_true", default=True,
-                    help="default ON: each panel gets its own colour "
+                    help="default ON: each panel gets its own color "
                     "range so weak modes are still readable")
     ap.add_argument("--shared-norm", action="store_true",
                     help="opposite of --per-panel-norm: shared cmap "
                     "across all panels (then weak modes look flat)")
     ap.add_argument("--out", required=True)
     ap.add_argument("--symmetric", action="store_true",
-                    help="symmetric vmin/vmax centred on 0 per panel "
+                    help="symmetric vmin/vmax centered on 0 per panel "
                     "(default: asymmetric percentile clip)")
     ap.add_argument("--tag", default=None)
     args = ap.parse_args()

@@ -1,7 +1,7 @@
 """Shared rendering helpers for 3D wafer-bonding visualisations.
 
 Centralises the geometry conventions (D2 mirror to full disk, circular
-wafer mask), colour scales (RdBu_r symmetric for signed displacement),
+wafer mask), color scales (RdBu_r symmetric for signed displacement),
 provenance footer, and the bonded-mask computation that several viz
 scripts need to share. Ported from the 2D wafer_app's
 render/views.py::compute_bonded_mask so the bonded-front semantics
@@ -12,11 +12,11 @@ Conventions baked in here:
     BOTH axes to reach the full disk (NOT C4 rotation -- the data has
     D2 dihedral symmetry).
   - Off-disk cells outside the unit circle are masked NaN before
-    rendering so they show as the matplotlib 'bad' colour (transparent
+    rendering so they show as the matplotlib 'bad' color (transparent
     by default) -- this is a display convention only; the loader
     keeps them zero in the training data.
   - Displacement is signed and has a meaningful zero (the unbonded
-    state); colour scale uses RdBu_r centred on 0 with vmax =
+    state); color scale uses RdBu_r centered on 0 with vmax =
     abs(field).max() so the cmap stays interpretable across runs.
 """
 
@@ -138,7 +138,7 @@ def shared_diverging_cmap(field: np.ndarray,
                           pct_lo: float = 1.0,
                           pct_hi: float = 99.0
                           ) -> tuple[float, float]:
-    """Compute vmin / vmax for a diverging colourmap.
+    """Compute vmin / vmax for a diverging colormap.
 
     With symmetric=True (the default for signed displacement) vmin = -V,
     vmax = +V, where V is the larger of |percentile(pct_lo)| and
@@ -172,7 +172,7 @@ def wafer_value_range(field: np.ndarray,
       - vmin = 1st percentile (most-negative tail, clipped to ignore
         a stray off-disk outlier)
       - vmax = 99th percentile; if `clip_positive_to_zero` (default),
-        cap vmax at 0 so the colour bar's "0" end stays anchored at
+        cap vmax at 0 so the color bar's "0" end stays anchored at
         the rest state (yellow) regardless of small positive numerical
         noise
 
@@ -311,7 +311,7 @@ def front_radius_per_t(bonded_mask: np.ndarray,
     # front to within 1/64 of the wafer radius.
     n_bins = 64
     edges = np.linspace(0.0, 1.0, n_bins + 1)
-    centres = 0.5 * (edges[:-1] + edges[1:])
+    centers = 0.5 * (edges[:-1] + edges[1:])
     bin_idx = np.clip(np.digitize(R.ravel(), edges) - 1, 0, n_bins - 1)
     counts_per_bin = np.bincount(bin_idx[in_disk.ravel()], minlength=n_bins)
     Nt = bonded_mask.shape[-1]
@@ -334,5 +334,5 @@ def front_radius_per_t(bonded_mask: np.ndarray,
             # fully unbonded
             continue
         i = int(np.argmax(below))   # first True
-        out[t] = float(centres[i])
+        out[t] = float(centers[i])
     return out

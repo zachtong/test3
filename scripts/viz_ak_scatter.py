@@ -12,7 +12,7 @@ near low-x, the per-mode anomaly really IS driving the worst-case
 field reconstructions and the next experiment should target that mode
 (e.g. add a sensor that observes mode 6's spatial structure).
 
-Per-panel colour points by per-sim rel-L2 (viridis), so each panel is
+Per-panel color points by per-sim rel-L2 (viridis), so each panel is
 its own miniature scatter of "this mode's mispredictions vs the rest
 of the field error". y=x diagonal drawn for reference; if points sit
 ABOVE diagonal, this mode error explains less than the rest; BELOW,
@@ -94,7 +94,7 @@ def main() -> int:
                 color="0.8", ls=":", lw=0.8)
         ax.plot([err_lo, err_hi], [err_lo * 2.0, err_hi * 2.0],
                 color="0.8", ls=":", lw=0.8)
-        # Colour by per-sim field rel-L2 (viridis as agreed: unsigned)
+        # Color by per-sim field rel-L2 (viridis as agreed: unsigned)
         sc = ax.scatter(a_err, field_errs, c=field_errs,
                         cmap="viridis", s=18, alpha=0.85,
                         edgecolors="none")

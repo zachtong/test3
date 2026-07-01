@@ -55,7 +55,7 @@ def test_parallel_fit_matches_serial(tmp_path):
 
 def test_parallel_fit_handles_more_workers_than_sims():
     """If workers > n_sims the fit should fall back to serial-like
-    behaviour rather than spawn empty workers."""
+    behavior rather than spawn empty workers."""
     sims = _mock_sims(n_sim=3)
     basis = PODBasis.fit(sims, K=2, verbose=False, workers=8)
     assert basis.Phi.shape == (16 * 16, 2)

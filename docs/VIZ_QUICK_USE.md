@@ -91,7 +91,7 @@ Override with `--drop-first-steps 0` to inspect the raw pre-trim view.
 
 ---
 
-## Visualisation
+## Visualization
 
 All viz lives under `scripts/viz_*.py` and shares `scripts/fieldviz/`
 (WAFER_CMAP palette, D2 mirror helpers, bonded-mask computation,
@@ -153,7 +153,7 @@ training prints it when fitting.
 | Goal | Command | Output |
 |---|---|---|
 | Model error vs POD floor scatter (the headline) | `python scripts/viz_error_vs_floor.py --results outputs/<tag>/results.json --out viz/err_vs_floor.png` | PNG ~80 KB |
-| Same, colour by a specific mode's per-sim error | `... --color-by a_6 --out viz/err_vs_floor_a6.png` | PNG, same |
+| Same, color by a specific mode's per-sim error | `... --color-by a_6 --out viz/err_vs_floor_a6.png` | PNG, same |
 | Per-mode error vs field error scatter (8 subplots) | `python scripts/viz_ak_scatter.py --results outputs/<tag>/results.json --out viz/ak_scatter.png` | PNG ~250 KB |
 
 ### Worst-case inspection (needs results.json + trained checkpoints)
@@ -203,7 +203,7 @@ under the same tag directory. From `viz_all` use
 - Colormap:
   - Signed displacement: TEL WAFER_CMAP (purple = deepest descent,
     yellow = rest / unbonded). Same as the 2D wafer_app GUI.
-  - Unsigned (errors, std, mode-error scatter colour): viridis.
+  - Unsigned (errors, std, mode-error scatter color): viridis.
 - Sensor markers: magenta (`SENSOR_PALETTE[4] = #DA1884`), never
   appears in WAFER_CMAP so stays visible at every value.
 - Bonding-front overlay: TEL **orange** (`SENSOR_PALETTE[6] = #E16A13`).

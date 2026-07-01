@@ -383,12 +383,12 @@ def render_sim_panel(sim_f: np.ndarray, x_canon: np.ndarray,
                      value_scale: float = 1.0e6) -> None:
     """Three-snapshot (t = first / middle / last) heatmap with sensors.
 
-    Per-frame colour scale: each subplot gets its own vmin/vmax so a
+    Per-frame color scale: each subplot gets its own vmin/vmax so a
     big late-time peak does not visually squash the early/mid frames
     into uniform black. The cost is that the three panels are no
     longer directly comparable in absolute amplitude -- the per-frame
     title prints the magnitude range so the reader still sees the
-    relative scales. Each subplot also gets its own colourbar.
+    relative scales. Each subplot also gets its own colorbar.
     """
     import matplotlib
     matplotlib.use("Agg")
@@ -406,7 +406,7 @@ def render_sim_panel(sim_f: np.ndarray, x_canon: np.ndarray,
             vmin_k, vmax_k = -1.0, 1.0
         else:
             # 1st / 99th percentile clipping keeps a single off-disk
-            # outlier or zero-mask cell from owning the colour scale.
+            # outlier or zero-mask cell from owning the color scale.
             vmin_k = float(np.percentile(finite, 1))
             vmax_k = float(np.percentile(finite, 99))
             if vmin_k == vmax_k:
@@ -420,7 +420,7 @@ def render_sim_panel(sim_f: np.ndarray, x_canon: np.ndarray,
                    marker="x", c="red", linewidths=1.5)
         fig.colorbar(im, ax=ax, shrink=0.85)
     axes[0].set_ylabel("y")
-    fig.suptitle(f"{title}  (per-frame colour scale; "
+    fig.suptitle(f"{title}  (per-frame color scale; "
                  f"u_z * {value_scale:g})")
     out_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out_path, dpi=130, bbox_inches="tight")

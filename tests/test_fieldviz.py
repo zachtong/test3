@@ -26,7 +26,7 @@ def test_mirror_d2_shape_doubled_with_shared_axis():
 
 def test_mirror_d2_recovers_symmetric_input():
     """If the input is already D2-symmetric (mirror about both axes), the
-    mirrored output's centre quadrant must equal the input."""
+    mirrored output's center quadrant must equal the input."""
     quarter = np.array([[5.0, 4.0, 3.0],
                         [4.0, 2.0, 1.0],
                         [3.0, 1.0, 0.0]])
@@ -272,7 +272,7 @@ def test_topdown_contour_does_not_accumulate_across_frames(tmp_path):
     showing concentric rings tracking the front's entire trajectory.
 
     We render a 2-frame GIF whose bonding front sweeps inward-to-outward
-    on a synthetic monotonic field, then count orange-coloured pixels
+    on a synthetic monotonic field, then count orange-colored pixels
     in the LAST frame's rendered image. With the bug, the last frame
     has ~2x the orange pixels of the first (it carries the first
     frame's contour too). With the fix, the last frame has roughly the

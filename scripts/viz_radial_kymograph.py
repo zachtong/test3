@@ -2,9 +2,9 @@
 
 This IS the 3D kymograph answer. Each panel is a 2D kymograph
 identical in shape to the 2D project's hero figure: x-axis = canonical
-time, y-axis = radius r in [0, 1], colour = upper-wafer displacement.
+time, y-axis = radius r in [0, 1], color = upper-wafer displacement.
 Three panels stacked vertically, sharing a single symmetric RdBu_r
-colour scale across the sim. Sensor radii (if they lie on one of the
+color scale across the sim. Sensor radii (if they lie on one of the
 plotted angles) get a horizontal tick on the corresponding panel.
 Bonded front radius is overlaid as a thin curve on every panel.
 
@@ -45,7 +45,7 @@ from scripts.fieldviz import (wafer_value_range,             # noqa: E402
                                WAFER_CMAP, SENSOR_PALETTE)
 
 
-# Bonded-front line colour. Orange (SENSOR_PALETTE[6] = #E16A13) is
+# Bonded-front line color. Orange (SENSOR_PALETTE[6] = #E16A13) is
 # distinct from every value in WAFER_CMAP so the front stays visible
 # from yellow (near-zero) all the way to purple (deepest descent).
 _FRONT_COLOR = SENSOR_PALETTE[6]
@@ -146,7 +146,7 @@ def render_radial_kymograph(sim: Simulation, x_canon: np.ndarray,
                                r_axis[0], r_axis[-1]],
                        vmin=vmin, vmax=vmax, cmap=WAFER_CMAP,
                        interpolation="nearest")
-        ax.set_ylabel("r (normalised)")
+        ax.set_ylabel("r (normalized)")
         ax.set_title(f"theta = {th:g} deg", fontsize=10)
         ax.plot(t_axis, front_r, color=_FRONT_COLOR, lw=1.4,
                 label="bonded front (3D mean)")
@@ -156,11 +156,11 @@ def render_radial_kymograph(sim: Simulation, x_canon: np.ndarray,
                     va="center", fontsize=7, color="black")
         if ax is axes[0]:
             ax.legend(loc="lower left", fontsize=8)
-    axes[-1].set_xlabel("normalised time")
+    axes[-1].set_xlabel("normalized time")
     fig.colorbar(im, ax=axes, shrink=0.85, location="right",
                  label=f"u_z * {value_scale:g}")
     fig.suptitle(f"{sim_id or 'sim'}  |  radial-slice kymograph trio  |  "
-                 f"per-sim shared colour scale", fontsize=11)
+                 f"per-sim shared color scale", fontsize=11)
     provenance_footer(fig, sim_id=sim_id, tag=tag,
                       extras={"drop": drop_first_steps,
                               "gap_um": gap_threshold_um,
@@ -187,7 +187,7 @@ def main() -> int:
     ap.add_argument("--gap-threshold-um", type=float, default=1.0)
     ap.add_argument("--value-scale", type=float, default=1.0e6,
                     help="multiply displacement by this for display "
-                    "(default 1e6 = metres -> micrometres)")
+                    "(default 1e6 = meters -> micrometers)")
     ap.add_argument("--sensor-radii", default="1.0,1.0,1.0",
                     help="comma list of r values; if a sensor's theta "
                     "matches one of --angles, its r is marked on that "

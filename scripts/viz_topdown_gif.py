@@ -2,8 +2,8 @@
 
 Default: a single full-disk heatmap that morphs through the
 trajectory, with sensors overlaid and a bonded-region contour drawn
-in orange (distinct from WAFER_CMAP's purple end). Per-frame colour
-normalisation by default so the within-frame bonded-region shape
+in orange (distinct from WAFER_CMAP's purple end). Per-frame color
+normalization by default so the within-frame bonded-region shape
 stays visible at every time step -- the curved lower-wafer profile
 emerges as the front sweeps. Pass --norm-mode per-sim to lock the
 cmap range across the animation when cross-frame amplitude
@@ -20,7 +20,7 @@ discards, so it is mostly near-zero).
     # add the raw debug panel
     ... --include-raw
 
-    # lock the colour scale across the whole animation
+    # lock the color scale across the whole animation
     ... --norm-mode per-sim
 
 In-process API (used by scripts/viz_all.py): import
@@ -52,7 +52,7 @@ from scripts.fieldviz import (mirror_d2, render_full_disk,    # noqa: E402
                                WAFER_CMAP, SENSOR_PALETTE)
 
 
-# Bonded-front contour colour. Orange (SENSOR_PALETTE[6] = #E16A13) is
+# Bonded-front contour color. Orange (SENSOR_PALETTE[6] = #E16A13) is
 # distinct from every value in WAFER_CMAP (which spans purple ->
 # turquoise -> cyan -> green -> yellow), so the contour stays visible
 # both on near-zero (yellow) cells and on deep-bonded (purple) cells.
@@ -143,8 +143,8 @@ def render_topdown_gif(sim: Simulation, x_canon: np.ndarray,
         ax_canon, sim.f[..., frame_idx[0]], x_canon, y_canon,
         vmin=vmin0, vmax=vmax0, mirror=True, mask_off_disk=True,
         sensor_xy=sensor_xy)
-    ax_canon.set_xlabel("x (normalised)")
-    ax_canon.set_ylabel("y (normalised)")
+    ax_canon.set_xlabel("x (normalized)")
+    ax_canon.set_ylabel("y (normalized)")
     ax_canon.set_title(f"canonical  t-idx {int(frame_idx[0])}")
     cbar_c = fig.colorbar(im_canon, ax=ax_canon, shrink=0.85,
                           label="u_z (m)")
@@ -281,7 +281,7 @@ def main() -> int:
                     choices=("per-frame", "per-sim"),
                     default="per-sim",
                     help="per-sim (default): lock vmin/vmax across the "
-                    "whole animation so every frame's colour is on the "
+                    "whole animation so every frame's color is on the "
                     "same physical scale (early frames look mostly yellow "
                     "= near-zero, later frames go purple as the bonded "
                     "interior descends). per-frame: each frame computes "
@@ -295,7 +295,7 @@ def main() -> int:
                     "near-zero, hence off by default)")
     ap.add_argument("--sensors", default="3-edge",
                     help="'3-edge' = lab rig (X/+D/Y) or comma list "
-                    "'r1:th1,r2:th2,...' in normalised + deg")
+                    "'r1:th1,r2:th2,...' in normalized + deg")
     ap.add_argument("--tag", default=None,
                     help="optional tag string for the provenance footer")
     args = ap.parse_args()

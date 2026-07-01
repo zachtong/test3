@@ -13,7 +13,7 @@ producing the observed plateau.
 This script confirms or refutes that. It walks one NPZ's `sample_tReal`,
 plots:
 
-  1. Histogram of native samples per 5% bin of normalised time s in [0, 1]
+  1. Histogram of native samples per 5% bin of normalized time s in [0, 1]
   2. Cumulative density of native samples vs s
   3. log10(forward dt) vs s, so adaptive-step regions stand out
 
@@ -73,13 +73,13 @@ def diagnose(path: Path, out_path: Path) -> int:
     if span <= 0:
         print("zero tReal span; cannot diagnose")
         return 1
-    s = (treal - treal.min()) / span             # normalised to [0, 1]
+    s = (treal - treal.min()) / span             # normalized to [0, 1]
 
     # --- 10% bin counts ---
     edges10 = np.linspace(0.0, 1.0, 11)
     counts10, _ = np.histogram(s, bins=edges10)
     print(f"\nnative samples: S = {S},  tReal span = {span:.4g} s")
-    print("\nsamples per 10% normalised-time bin:")
+    print("\nsamples per 10% normalized-time bin:")
     print(f"  {'bin':>10}  {'count':>8}  {'fraction':>10}")
     for i in range(10):
         lo, hi = edges10[i], edges10[i + 1]
@@ -103,7 +103,7 @@ def diagnose(path: Path, out_path: Path) -> int:
           f"min={dt_min:.4g}  median={dt_med:.4g}  max={dt_max:.4g}")
     print(f"  max/min ratio = {ratio:.2g}")
 
-    # --- where does the densest region sit in normalised time? ---
+    # --- where does the densest region sit in normalized time? ---
     # 5% windows, find argmax
     edges20 = np.linspace(0.0, 1.0, 21)
     counts20, _ = np.histogram(s, bins=edges20)
@@ -135,7 +135,7 @@ def diagnose(path: Path, out_path: Path) -> int:
 
     axes[0].bar(edges20[:-1], counts20, width=np.diff(edges20),
                 align="edge", color="C0", edgecolor="black", lw=0.4)
-    axes[0].set_xlabel("normalised tReal  s  in [0, 1]")
+    axes[0].set_xlabel("normalized tReal  s  in [0, 1]")
     axes[0].set_ylabel("native samples per 5% bin")
     axes[0].set_title(f"{path.name}: native time density "
                       f"(S={S}, span={span:.3g}s)")
@@ -148,7 +148,7 @@ def diagnose(path: Path, out_path: Path) -> int:
     axes[1].plot(np.sort(s), cdf, "C0-", lw=1.2)
     axes[1].plot([0, 1], [0, 1], "0.5", ls="--", lw=1,
                  label="uniform reference")
-    axes[1].set_xlabel("normalised tReal s")
+    axes[1].set_xlabel("normalized tReal s")
     axes[1].set_ylabel("cumulative fraction of native samples")
     axes[1].set_title("CDF of native time samples")
     axes[1].legend(fontsize=8)
@@ -160,9 +160,9 @@ def diagnose(path: Path, out_path: Path) -> int:
     axes[2].semilogy(s_mid[pos_mask], dt[pos_mask], "C0.", ms=2)
     axes[2].axhline(dt_med, color="0.5", ls="--", lw=1,
                     label=f"median dt = {dt_med:.2g}")
-    axes[2].set_xlabel("normalised tReal s")
+    axes[2].set_xlabel("normalized tReal s")
     axes[2].set_ylabel("forward dt (s)")
-    axes[2].set_title("forward dt vs normalised time "
+    axes[2].set_title("forward dt vs normalized time "
                       f"(adaptive-step regions stand out; ratio "
                       f"max/min = {ratio:.1g})")
     axes[2].legend(fontsize=8)

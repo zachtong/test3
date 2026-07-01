@@ -12,12 +12,12 @@ Conventions baked in here:
     and interactive)
   - cells outside the unit circle masked to NaN so they render
     transparent
-  - colour: WAFER_CMAP (TEL palette); same physical scale as the
+  - color: WAFER_CMAP (TEL palette); same physical scale as the
     other displacement viz
   - camera default: elev=28, azim=-60 -- a 3/4 isometric that shows
     both surface curvature and the bonding-front extent
   - box aspect z is squished (0.40) so the wafer-sized x/y stays
-    larger than the micrometre-scale z; otherwise the disk degenerates
+    larger than the micrometer-scale z; otherwise the disk degenerates
     to a thin sliver
 """
 from __future__ import annotations
@@ -66,10 +66,10 @@ def render_3d_frame(ax, field_frame: np.ndarray,
                     lower_alpha: float = 0.35) -> dict:
     """Render one (Nx, Ny) frame onto a 3D axes; return handles.
 
-    field_frame:  quarter-disk u_z (in metres) at one timestep
-    vmin / vmax:  per-sim displacement range (metres, NOT scaled)
+    field_frame:  quarter-disk u_z (in meters) at one timestep
+    vmin / vmax:  per-sim displacement range (meters, NOT scaled)
     value_scale:  multiplied through to get display units; default 1e6
-                  -> micrometres. The z-axis label reflects this.
+                  -> micrometers. The z-axis label reflects this.
 
     Returns a dict {'upper', 'lower', 'sensors'} of mpl artists for
     callers that want to mutate them (e.g. an animation loop).

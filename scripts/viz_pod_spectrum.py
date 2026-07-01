@@ -45,7 +45,7 @@ def main() -> int:
                     "vertical dashed line); default 8")
     ap.add_argument("--anomaly-mode", type=int, default=6,
                     help="optional: mark this mode index (1-based) as "
-                    "anomalous with a coloured dot. Pass 0 to disable.")
+                    "anomalous with a colored dot. Pass 0 to disable.")
     ap.add_argument("--out", required=True)
     ap.add_argument("--tag", default=None)
     args = ap.parse_args()

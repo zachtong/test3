@@ -48,7 +48,7 @@ _WAFER_CMAP_BASES = (
 WAFER_CMAP = LinearSegmentedColormap.from_list(
     "wafer_app", _WAFER_CMAP_BASES, N=256)
 
-# Default colour for sensor markers (magenta -- not in WAFER_CMAP so
+# Default color for sensor markers (magenta -- not in WAFER_CMAP so
 # it stays visible against any value).
 SENSOR_MARKER_COLOR = SENSOR_PALETTE[4]
 
@@ -72,7 +72,7 @@ def wafer_cmap_to_plotly() -> list[list]:
 
 
 def sensor_color(index: int) -> tuple[float, float, float]:
-    """Cyclic colour from SENSOR_PALETTE; darkens after one full cycle
+    """Cyclic color from SENSOR_PALETTE; darkens after one full cycle
     so traces stay distinguishable past 7 sensors."""
     base = SENSOR_PALETTE[index % len(SENSOR_PALETTE)]
     cycle = index // len(SENSOR_PALETTE)

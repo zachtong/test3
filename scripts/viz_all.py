@@ -184,7 +184,7 @@ def main() -> int:
                     help="comma list of viz names to skip")
     ap.add_argument("--force", action="store_true",
                     help="overwrite existing output files; default "
-                    "behaviour is to skip already-rendered figures so "
+                    "behavior is to skip already-rendered figures so "
                     "re-runs are cheap")
     ap.add_argument("--nx", type=int, default=128)
     ap.add_argument("--ny", type=int, default=128)
@@ -485,7 +485,7 @@ def main() -> int:
                        "--out", str(target),
                        *tag_args]
                 _run(cmd, target, args.force, log)
-                # plus the a_6-coloured variant (cheap, useful)
+                # plus the a_6-colored variant (cheap, useful)
                 target = ml_dir / "err_vs_floor_a6.png"
                 cmd = [py, str(_root / "scripts" / "viz_error_vs_floor.py"),
                        "--results", str(rs),

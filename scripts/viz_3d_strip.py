@@ -2,7 +2,7 @@
 
 Renders a single PNG with three 3D-surface panels side-by-side at
 canonical timesteps t=0 / t=mid / t=final. All three share the same
-camera angle, colour scale, lower-wafer plane, and box aspect, so the
+camera angle, color scale, lower-wafer plane, and box aspect, so the
 operator can read the front sweep, the descent depth, and the bonded-
 plateau formation at a glance.
 
@@ -153,7 +153,7 @@ def main() -> int:
                     "physically obvious")
     ap.add_argument("--lower-z", type=float, default=None,
                     help="override the auto-estimated lower wafer z "
-                    "(in metres; only used with --show-lower)")
+                    "(in meters; only used with --show-lower)")
     ap.add_argument("--n-panels", type=int, default=3,
                     help="number of time snapshots (default 3)")
     ap.add_argument("--elev", type=float, default=DEFAULT_ELEV)

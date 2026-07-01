@@ -83,7 +83,7 @@ def _accumulate_gram_parallel(sims: list, n_space: int, workers: int,
     returned partial into a single C as it arrives.
 
     IPC cost: each worker pickles + returns a 2 GB float64 array. On
-    Linux fork that's the only IPC, and at 32 workers the deserialise
+    Linux fork that's the only IPC, and at 32 workers the deserialize
     + add takes seconds vs the minutes saved by parallel GEMM.
     """
     from concurrent.futures import ProcessPoolExecutor

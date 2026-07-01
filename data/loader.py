@@ -73,8 +73,8 @@ _QUARTER_TOL = 1e-6   # native x/y allowed slightly negative due to float roundo
 _TREAL_BACKWARD_FACTOR = 10.0
 
 # Wafer physical radius. The 3D converter writes coordinates_upper /
-# _lower in raw physical metres (range 0 .. R), but the canonical grid
-# downstream lives in normalised [0, 1]. The loader divides every
+# _lower in raw physical meters (range 0 .. R), but the canonical grid
+# downstream lives in normalized [0, 1]. The loader divides every
 # native (x, y) by this constant before feeding it to Delaunay so the
 # point cloud and the canonical grid agree on units. Matches the 2D
 # pipeline's WAFER_RADIUS_M = 0.15. If you ever switch to a different
@@ -280,7 +280,7 @@ def preflight_npz(path) -> tuple[bool, str | None]:
             # (10) quarter-disk on every upper coord set + native-units
             # sanity check. Native coords must (a) lie in the first
             # quadrant and (b) reach a max in the expected physical
-            # range [0.5*R, 1.5*R] -- the loader normalises by
+            # range [0.5*R, 1.5*R] -- the loader normalizes by
             # _WAFER_RADIUS_M, so coords already in [0, 1] or in a wildly
             # different unit (mm, um, ...) would silently produce a
             # wrong-scale grid.
@@ -300,7 +300,7 @@ def preflight_npz(path) -> tuple[bool, str | None]:
                         f"step_{i:04d}_coordinates_upper: max(|x|, |y|) = "
                         f"{axis_max:g} outside expected range "
                         f"[{r_lo:g}, {r_hi:g}] m (loader assumes native "
-                        f"coords in physical metres with R = "
+                        f"coords in physical meters with R = "
                         f"{_WAFER_RADIUS_M} m)")
 
             # (11) sample_tReal monotonicity; small overlaps at step
@@ -448,7 +448,7 @@ def _build_one(args):
     # compatibility with callers that haven't been updated yet -- the
     # CLI diagnostic scripts and any external user code may still pass
     # the old shape. Default drop_first_steps=0 keeps the no-trim
-    # behaviour.
+    # behavior.
     if len(args) == 4:
         path_str, x_canon, y_canon, t_canon = args
         drop_first_steps = 0
@@ -531,9 +531,9 @@ def _build_one(args):
             sample_ks = np.where(mask)[0]
             prefix = f"step_{int(step_idx):04d}"
             coords = np.asarray(z[f"{prefix}_coordinates_upper"])    # (3, N_up)
-            # Normalise from physical metres into the canonical [0, 1] frame.
+            # Normalize from physical meters into the canonical [0, 1] frame.
             # The converter writes raw COMSOL coordinates (range 0..R, with
-            # R = _WAFER_RADIUS_M); the canonical grid is normalised, so
+            # R = _WAFER_RADIUS_M); the canonical grid is normalized, so
             # this division is what makes Delaunay actually cover the full
             # quarter-disk. Without it the entire wafer mesh gets crammed
             # into the (0..R) corner of the canonical grid and ~99% of the
@@ -889,7 +889,7 @@ def load_dataset(path, nx: int = 128, ny: int = 128, nt: int = 300,
     but carry almost no signal; setting drop_first_steps=1 cuts that
     dead zone before canonicalize so the canonical time grid lands
     entirely on the bonding event. Default 0 preserves the no-drop
-    behaviour for any downstream that wants the full trajectory.
+    behavior for any downstream that wants the full trajectory.
     """
     folder = Path(path)
     if not folder.is_dir():

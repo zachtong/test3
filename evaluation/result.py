@@ -19,7 +19,7 @@ class ResultSet:
     gap_to_floor: float
     n_params: int
     per_seed_medians: list[float]
-    # Per-test-sim arrays, kept so downstream visualisation (e.g.
+    # Per-test-sim arrays, kept so downstream visualization (e.g.
     # scripts/viz_error_vs_floor.py) does not need to re-run the model.
     # Optional + defaulted to empty so loading an OLD results.json
     # without these fields still works -- backward compatibility.

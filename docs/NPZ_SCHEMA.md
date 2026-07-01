@@ -400,11 +400,11 @@ normally.
     tolerance AND `max(|x|, |y|)` falls in
     `[0.5 * _WAFER_RADIUS_M, 1.5 * _WAFER_RADIUS_M]` =
     `[0.075, 0.225]` m. The converter writes raw COMSOL coordinates
-    in physical metres, and the loader divides by
+    in physical meters, and the loader divides by
     `_WAFER_RADIUS_M = 0.15` to land on the canonical `[0, 1]`
-    grid; rejecting coords outside the expected metres range catches
-    both a future converter that starts pre-normalising (would cause
-    silent double-normalisation) and a wrong-unit drift (mm or um).
+    grid; rejecting coords outside the expected meters range catches
+    both a future converter that starts pre-normalizing (would cause
+    silent double-normalization) and a wrong-unit drift (mm or um).
 11. `sample_tReal` monotonicity: the largest backward jump (negative
     `np.diff`) must not exceed `_TREAL_BACKWARD_FACTOR * typ_dt`, where
     `typ_dt` is the median forward dt across all samples. The default

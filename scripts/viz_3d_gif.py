@@ -5,7 +5,7 @@ descends from rest (z=0, yellow) toward the bonded plateau (deep
 purple) as the front sweeps. Optionally draws a translucent flat
 lower wafer reference plane so the gap is visually obvious.
 
-Full disk via D2 mirror, per-sim locked colour scale (so amplitude is
+Full disk via D2 mirror, per-sim locked color scale (so amplitude is
 physically comparable across frames), default isometric camera
 (elev=28, azim=-60). Output is a GIF -- portable, embeds in PPT /
 talks without needing ffmpeg.
@@ -167,7 +167,7 @@ def main() -> int:
                     "the lower wafer at z = p5(final-frame u_z)")
     ap.add_argument("--lower-z", type=float, default=None,
                     help="override the auto-estimated lower wafer z "
-                    "(in metres; only used with --show-lower)")
+                    "(in meters; only used with --show-lower)")
     ap.add_argument("--elev", type=float, default=DEFAULT_ELEV,
                     help=f"camera elevation in deg (default "
                     f"{DEFAULT_ELEV:.0f})")
