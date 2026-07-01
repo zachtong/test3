@@ -74,6 +74,16 @@ distinct.
 
 ---
 
+## Pre-training GT trustworthiness (run this before a fresh training)
+
+| Goal | Command | Output |
+|---|---|---|
+| Sanity-check N sims after loader fixes (tReal monotonicity / temporal rebound / edge-kink at r~1 / dead cells) | `python scripts/inspect_gt_quality.py --npz-dir <folder> --n-check 20 --out viz/gt_quality/` | summary.json + gt_quality.png |
+| Specific sims (e.g. ones that showed artifacts) | `... --sim run_00473.npz,run_01102.npz` | same |
+
+Exit code: 0 = all PASS, 1 = any FAIL. Blocks retraining until you
+understand why FAIL fired (or explicitly waive it).
+
 ## NPZ inspection (no training needed)
 
 | Goal | Command | Output |
