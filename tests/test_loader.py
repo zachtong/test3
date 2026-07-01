@@ -90,7 +90,7 @@ def test_cache_roundtrip(fixture_folder):
     nx, ny, nt = 32, 32, 16
     x1, y1, sims_a = load_dataset(fixture_folder, nx=nx, ny=ny, nt=nt,
                                   cache=True, workers=1)
-    cache_path = fixture_folder / f"_loader_cache_{nx}x{ny}x{nt}.npz"
+    cache_path = fixture_folder / f"_loader_cache_{nx}x{ny}x{nt}_r0p99.npz"
     assert cache_path.exists()
     x2, y2, sims_b = load_dataset(fixture_folder, nx=nx, ny=ny, nt=nt,
                                   cache=True, workers=1)
@@ -287,8 +287,8 @@ def test_drop_first_steps(tmp_path):
                            workers=1, drop_first_steps=0)
     _, _, _ = load_dataset(folder, nx=16, ny=16, nt=8, cache=True,
                            workers=1, drop_first_steps=1)
-    assert (folder / "_loader_cache_16x16x8.npz").exists()
-    assert (folder / "_loader_cache_16x16x8_drop1.npz").exists()
+    assert (folder / "_loader_cache_16x16x8_r0p99.npz").exists()
+    assert (folder / "_loader_cache_16x16x8_drop1_r0p99.npz").exists()
 
 
 def test_drop_first_steps_too_many_raises(tmp_path):
@@ -383,6 +383,37 @@ def test_loader_backward_treal_does_not_produce_rebound(tmp_path):
         f"loaded field has a rebound of magnitude {max_rise:.3e} m "
         f"despite native-index-order monotonic descent; the "
         f"tReal backward-jump canonicalization bug is back.")
+
+
+def test_rim_mask_zeros_cells_beyond_0p99(tmp_path):
+    """The loader's inner disk mask is r <= 0.99, not r <= 1.0. This
+    is the fix for the theta=45-deg edge kink documented in the
+    loader's _DISK_MASK_R_END comment. Verify that after canonical-
+    ization, every cell with r > 0.99 (but still <= 1.0) is exactly
+    zero across all timesteps."""
+    from data.loader import _DISK_MASK_R_END
+    assert _DISK_MASK_R_END < 1.0, (
+        "constant should be < 1 for this test to be meaningful")
+    p = tmp_path / "one.npz"
+    make_mock_3d_npz(p, **_good_mock_kwargs())
+    x, y, sims = load_dataset(tmp_path, nx=64, ny=64, nt=8,
+                              cache=False, workers=1)
+    assert sims
+    f = sims[0].f
+    X, Y = np.meshgrid(x, y, indexing="ij")
+    r = np.sqrt(X * X + Y * Y)
+    # Rim annulus: cells in (_DISK_MASK_R_END, 1.0]
+    rim_shell = (r > _DISK_MASK_R_END) & (r <= 1.0)
+    assert rim_shell.any(), "test fixture has no cells in rim shell"
+    # Every timestep must be zero in the shell.
+    assert (f[rim_shell] == 0).all(), (
+        f"rim shell (r in ({_DISK_MASK_R_END}, 1.0]) has non-zero "
+        f"cells post-canonicalization: max abs value = "
+        f"{np.abs(f[rim_shell]).max():.3e}")
+    # Sanity: interior is not all zero.
+    interior = r <= _DISK_MASK_R_END - 0.05
+    assert (f[interior] != 0).any(), (
+        "interior should have non-trivial u_z somewhere")
 
 
 def test_preflight_tolerates_small_treal_overlap(tmp_path):
@@ -493,7 +524,7 @@ def test_cache_records_skip_log(tmp_path):
     x1, y1, sims_a = load_dataset(folder, nx=16, ny=16, nt=8,
                                   cache=True, workers=1)
     assert len(sims_a) == 1
-    cache_path = folder / "_loader_cache_16x16x8.npz"
+    cache_path = folder / "_loader_cache_16x16x8_r0p99.npz"
     assert cache_path.exists()
     with np.load(cache_path, allow_pickle=True) as z:
         assert "skipped_files" in z.files

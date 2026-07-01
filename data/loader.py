@@ -59,6 +59,19 @@ from core.simulation import Simulation
 from core.grid import canonical_grid, disk_mask
 
 _CACHE_PREFIX = "_loader_cache_"
+# Inner disk mask r_end. Physical wafer radius is 1.0 in canonical
+# coords, but at r > 0.99 the Delaunay hull typically under-shoots
+# (native COMSOL point density drops near the rim, worst at the
+# 45-deg corner of the quarter disk) and the nearest-fill fallback
+# picks anomalous rim-BC values that produce a sharp non-physical
+# upward kink in the loaded field along theta=45 deg (verified by
+# scripts/inspect_gt_quality.py on firehorse1_and_2: 64% rise from
+# r=0.99 to r=1.0 along theta=45, while theta=0 / 90 are clean).
+# Cells at r > _DISK_MASK_R_END are treated as off-disk (zeroed after
+# canonicalization) so the artifact cannot enter the POD basis or
+# the model's training loss. Downstream viz treats them the same way
+# as physical off-disk cells.
+_DISK_MASK_R_END = 0.99
 _PARALLEL_MIN = 32
 _QUARTER_TOL = 1e-6   # native x/y allowed slightly negative due to float roundoff
 
@@ -520,7 +533,8 @@ def _build_one(args):
 
         # --- disk mask computed once, used both for nearest-fill
         # decision (in_disk_flat) and for the final off-disk zeroing. ---
-        mask2d = disk_mask(nx, ny, x_canon[-1], y_canon[-1])
+        mask2d = disk_mask(nx, ny, x_canon[-1], y_canon[-1],
+                            r_end=_DISK_MASK_R_END)
         in_disk_flat = mask2d.ravel()
 
         # --- spatial: per-step Delaunay, shared across all samples in step ---
@@ -932,10 +946,15 @@ def load_dataset(path, nx: int = 128, ny: int = 128, nt: int = 300,
 
     x_canon, y_canon = canonical_grid(nx, ny, x_end, y_end)
     t_canon = np.linspace(0.0, 1.0, nt)
-    # Cache key includes drop_first_steps so the no-drop and
-    # drop-step-0 outputs never collide. Suffix is suppressed when
-    # drop=0 so pre-existing caches keep their original filename.
+    # Cache key includes drop_first_steps + rim-mask r_end so
+    # incompatible outputs never collide:
+    #   drop=0, r=1.0 -> pre-existing filename (no suffix)
+    #   drop=1, r=1.0 -> ..._drop1 (pre-rim-fix cache path)
+    #   drop=1, r=0.99 -> ..._drop1_r0p99 (post-rim-fix)
+    # This makes an old-cache HIT impossible after the rim tighten.
     suffix = "" if drop_first_steps == 0 else f"_drop{drop_first_steps}"
+    if _DISK_MASK_R_END != 1.0:
+        suffix += f"_r{_DISK_MASK_R_END:.4g}".replace(".", "p")
     cache_path = folder / f"{_CACHE_PREFIX}{nx}x{ny}x{nt}{suffix}.npz"
 
     for stale in folder.glob(f"{_CACHE_PREFIX}*.tmp.npz"):
