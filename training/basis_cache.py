@@ -102,8 +102,32 @@ def load_or_fit_basis(sims, K: int, *, npz_dir, nx, ny, nt,
             print(f"  POD basis cache unreadable ({e}); refitting",
                   flush=True)
 
-    print(f"  POD basis cache MISS: fitting K={k_cache} on "
-          f"{n_fit} sims (workers={workers}) ...", flush=True)
+    # Diagnostic MISS logging: show the key tuple the caller resolved
+    # and list any existing pod3d_*.npz that might have had a different
+    # key. Helps operators see WHICH field differed when they thought
+    # the cache should have hit (e.g. training vs viz using different
+    # npz_dir string, or an unnoticed change in train_frac / seed).
+    print(f"  POD basis cache MISS: expected {path.name}", flush=True)
+    print(f"    key tuple: npz_dir={npz_dir!r} nx={nx} ny={ny} nt={nt} "
+          f"x_end={x_end} y_end={y_end} "
+          f"drop_first_steps={drop_first_steps} seed={seed} "
+          f"train_frac={train_frac} val_frac={val_frac} n_fit={n_fit}",
+          flush=True)
+    _existing = sorted(cache_dir.glob("pod3d_*.npz"))
+    if _existing:
+        print(f"    existing pod3d files under {cache_dir}:", flush=True)
+        for _p in _existing[:8]:
+            print(f"      {_p.name}", flush=True)
+        if len(_existing) > 8:
+            print(f"      ... and {len(_existing) - 8} more", flush=True)
+        print(f"    if one of these was your training's basis, some key "
+              f"element above differs from what training saw. Grep "
+              f"outputs/<tag>/results.json for the ones you can inspect "
+              f"(npz_dir, data.seed, train.val_frac, data.train_frac, "
+              f"data.drop_first_steps).",
+              flush=True)
+    print(f"  fitting K={k_cache} on {n_fit} sims "
+          f"(workers={workers}) ...", flush=True)
     t0 = time.time()
     full = PODBasis.fit(sims, K=k_cache, workers=workers)
     print(f"  POD basis fit in {(time.time() - t0) / 60.0:.1f} min",
