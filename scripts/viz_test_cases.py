@@ -261,6 +261,112 @@ def _render_snapshot(out_path, *, gt, pr, err, a_pred, a_true, t, K,
     plt.close(fig)
 
 
+def _render_radial_anim(out_path, *, w_true_m, w_pred_m,
+                        x_canon, y_canon, angles,
+                        sim_id, tag, rel_l2, test_idx, sel_label,
+                        results_path, value_scale=1.0e6,
+                        fps=18, max_frames=60):
+    """Animated 1D radial-slice comparison of GT vs predicted.
+
+    Layout: one subplot per angle in `angles` (default 0 / 45 / 90
+    deg), side by side. Each subplot: x = r in [0, 1], y = u_z
+    (per-sim locked), one solid line for GT and one dashed line for
+    the prediction. As time advances the two curves morph together
+    -- ideal for showing at a glance whether the model tracks the
+    descending upper wafer along each radial ray in real-time.
+
+    Output: GIF (PillowWriter, no ffmpeg needed).
+    """
+    from scripts.viz_radial_kymograph import _sample_radial_kymograph
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from matplotlib.animation import FuncAnimation, PillowWriter
+
+    n_r = w_true_m.shape[0]
+    nt = w_true_m.shape[-1]
+    gts = [_sample_radial_kymograph(
+        w_true_m.astype(np.float64), x_canon, y_canon, th, n_r=n_r)
+        for th in angles]
+    prs = [_sample_radial_kymograph(
+        w_pred_m.astype(np.float64), x_canon, y_canon, th, n_r=n_r)
+        for th in angles]
+    scaled_gts = [g * value_scale for g in gts]
+    scaled_prs = [p * value_scale for p in prs]
+
+    # Per-sim locked y-limits so descent is monotonic on screen.
+    all_signed = np.concatenate(
+        [g.ravel() for g in scaled_gts]
+        + [p.ravel() for p in scaled_prs])
+    ymin, ymax = wafer_value_range(all_signed)
+    span = max(ymax - ymin, 1.0)
+    ymin -= 0.05 * span
+    ymax += 0.05 * span
+
+    if nt > max_frames:
+        frame_idx = np.linspace(0, nt - 1, max_frames).astype(int)
+    else:
+        frame_idx = np.arange(nt)
+    r_axis = np.linspace(0.0, 1.0, n_r)
+
+    fig, axes = plt.subplots(
+        1, len(angles),
+        figsize=(4.5 * len(angles), 5.2),
+        sharex=True, sharey=True, constrained_layout=True)
+    if len(angles) == 1:
+        axes = [axes]
+
+    lines_gt = []
+    lines_pr = []
+    for i, (ax, th) in enumerate(zip(axes, angles)):
+        lg, = ax.plot(r_axis, scaled_gts[i][:, int(frame_idx[0])],
+                       color="0.2", lw=2.2, label="GT")
+        lp, = ax.plot(r_axis, scaled_prs[i][:, int(frame_idx[0])],
+                       color=SENSOR_MARKER_COLOR, lw=2.0, ls="--",
+                       label="predicted")
+        lines_gt.append(lg)
+        lines_pr.append(lp)
+        ax.set_ylim(ymin, ymax)
+        ax.set_xlim(0.0, 1.0)
+        ax.set_xlabel("r (normalized)")
+        ax.set_title(f"theta = {th:g} deg", fontsize=10)
+        ax.grid(alpha=0.3)
+        # Zero line as a visual reference for the rest state.
+        ax.axhline(0.0, color="0.7", lw=0.8, ls=":")
+    axes[0].set_ylabel(f"u_z * {value_scale:g}")
+    axes[0].legend(fontsize=9, loc="lower right")
+
+    def _title_at(t_idx: int) -> str:
+        return (f"{tag}  |  {sel_label}  |  test_idx="
+                f"{int(test_idx)}  |  rel-L2={rel_l2:.4f}  |  "
+                f"{sim_id}  |  t-idx {t_idx}/{nt - 1}")
+
+    fig.suptitle(_title_at(int(frame_idx[0])), fontsize=11)
+
+    def update(i):
+        t_idx = int(frame_idx[i])
+        for lg, lp, gt, pr in zip(
+                lines_gt, lines_pr, scaled_gts, scaled_prs):
+            lg.set_ydata(gt[:, t_idx])
+            lp.set_ydata(pr[:, t_idx])
+        fig.suptitle(_title_at(t_idx), fontsize=11)
+        return lines_gt + lines_pr
+
+    print(f"rendering {len(frame_idx)} radial-anim frames at "
+          f"{fps} fps -> {out_path}", flush=True)
+    anim = FuncAnimation(fig, update, frames=len(frame_idx),
+                          interval=1000 // fps, blit=False)
+    writer = PillowWriter(fps=fps)
+    provenance_footer(fig, sim_id=sim_id, tag=tag,
+                      results_file=results_path,
+                      extras={"idx": int(test_idx),
+                              "sel": (sel_label.split()[0]),
+                              "layout": "radial_anim"})
+    Path(out_path).parent.mkdir(parents=True, exist_ok=True)
+    anim.save(str(out_path), writer=writer, dpi=100)
+    plt.close(fig)
+
+
 def _render_kymo_compare(out_path, *, w_true_m, w_pred_m, x_canon,
                           y_canon, angles, sim_id, tag, rel_l2,
                           test_idx, sel_label, results_path,
@@ -420,17 +526,23 @@ def main() -> int:
                     "produces a MISS. The file's k_cache must be >= "
                     "cfg.pod.k; a smaller stored K raises. Runs "
                     "predict_run_fields without touching load_or_fit_basis.")
-    ap.add_argument("--layout", choices=("snapshot", "kymo", "both"),
-                    default="snapshot",
-                    help="figure layout per selected sim. "
-                    "'snapshot' (default): 3 full-disk heatmaps at t* "
-                    "(GT/pred/err) + K a_k(t) subplots -- the legacy "
-                    "worst-case triage view. 'kymo': 3x3 grid of radial-"
-                    "slice kymographs (rows=theta 0/45/90, cols=GT/"
-                    "pred/|err|) -- shows how w(r,t) prediction tracks "
-                    "GT over time along the lab-rig sensor angles. "
-                    "'both' emits both PNGs; the kymo one gets a "
-                    "'_kymo' filename suffix.")
+    ap.add_argument("--layout", default="snapshot",
+                    help="figure layout(s) per selected sim. Accepts a "
+                    "COMMA LIST; every listed layout emits one file "
+                    "per sim. Valid layouts:\n"
+                    "  snapshot -- 3 full-disk heatmaps at t* (GT/"
+                    "pred/err) + K a_k(t) subplots. Legacy triage "
+                    "view. Filename: <slot>_relL2*.png\n"
+                    "  kymo -- 3x3 grid of radial-slice kymographs "
+                    "(rows=theta 0/45/90, cols=GT/pred/|err|). "
+                    "Filename: <slot>_relL2*_kymo.png\n"
+                    "  radial_anim -- 3 subplots (one per angle) "
+                    "showing w(r) as a 1D curve, GT solid + pred "
+                    "dashed, ANIMATED over time. Ideal for showing "
+                    "'does the predicted wafer descend the same way "
+                    "the real one does'. Filename: <slot>_relL2*"
+                    "_radial.gif\n"
+                    "'both' is a legacy alias for 'snapshot,kymo'.")
     ap.add_argument("--kymo-angles", default="0,45,90",
                     help="comma list of theta values (deg) for the "
                     "kymo layout (default: 0,45,90 -- lab rig)")
@@ -576,8 +688,22 @@ def main() -> int:
 
     kymo_angles = [float(a) for a in args.kymo_angles.split(",")
                     if a.strip()]
-    want_snapshot = args.layout in ("snapshot", "both")
-    want_kymo = args.layout in ("kymo", "both")
+    # Parse --layout as comma list. 'both' is a legacy alias.
+    layout_list = [l.strip() for l in args.layout.split(",")
+                    if l.strip()]
+    if "both" in layout_list:
+        layout_list = [l for l in layout_list if l != "both"] + [
+            "snapshot", "kymo"]
+    valid_layouts = {"snapshot", "kymo", "radial_anim"}
+    unknown_layouts = [l for l in layout_list if l not in valid_layouts]
+    if unknown_layouts:
+        print(f"unknown --layout(s): {unknown_layouts}; valid: "
+              f"{sorted(valid_layouts)} (or 'both' for legacy alias)",
+              file=sys.stderr)
+        return 2
+    want_snapshot = "snapshot" in layout_list
+    want_kymo = "kymo" in layout_list
+    want_radial_anim = "radial_anim" in layout_list
 
     total_files = 0
     for s in selections:
@@ -627,6 +753,22 @@ def main() -> int:
                     results_path=results_path,
                     value_scale=args.value_scale)
                 print(f"  wrote {kymo_out}", flush=True)
+                total_files += 1
+            if want_radial_anim:
+                rad_out = this_dir / f"{base_name}_radial.gif"
+                _render_radial_anim(
+                    rad_out,
+                    w_true_m=out_data["w_true"][slot],
+                    w_pred_m=out_data["w_pred"][slot],
+                    x_canon=out_data["x_canon"],
+                    y_canon=out_data["y_canon"],
+                    angles=kymo_angles,
+                    sim_id=bname, tag=args.tag,
+                    rel_l2=rel_l2, test_idx=int(test_idx),
+                    sel_label=s["label"],
+                    results_path=results_path,
+                    value_scale=args.value_scale)
+                print(f"  wrote {rad_out}", flush=True)
                 total_files += 1
 
     print(f"\nall {total_files} test-case figure(s) across "
