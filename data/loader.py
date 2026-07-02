@@ -60,30 +60,26 @@ from core.grid import canonical_grid, disk_mask
 
 _CACHE_PREFIX = "_loader_cache_"
 # Inner disk mask r_end. Physical wafer radius is 1.0 in canonical
-# coords, but at r > 0.99 the Delaunay hull typically under-shoots
-# (native COMSOL point density drops near the rim, worst at the
-# 45-deg corner of the quarter disk) and the nearest-fill fallback
-# picks anomalous rim-BC values that produce a sharp non-physical
-# upward kink in the loaded field along theta=45 deg (verified by
-# scripts/inspect_gt_quality.py on firehorse1_and_2: 64% rise from
-# r=0.99 to r=1.0 along theta=45, while theta=0 / 90 are clean).
-# Cells at r > _DISK_MASK_R_END are treated as off-disk (zeroed after
-# canonicalization) so the artifact cannot enter the POD basis or
-# the model's training loss. Downstream viz treats them the same way
-# as physical off-disk cells.
-_DISK_MASK_R_END = 0.99
+# coords. Cells at r > _DISK_MASK_R_END are treated as off-disk
+# (zeroed post-canonicalization). Set to 1.0 to match the physical
+# wafer edge -- earlier iterations tried 0.99 to hide a suspected
+# rim artifact, but that introduced a false zero shell that
+# nearest-fill / interpolation would never produce on its own; it
+# reads as a hard cliff in every downstream plot. The RIGHT approach
+# is to trust the loader's nearest-fill to give values in the
+# native range (which by definition contain no zeros unless the
+# COMSOL sim itself has zeros at those coords) and diagnose any
+# residual kink with scripts/diagnose_rim_kink.py.
+_DISK_MASK_R_END = 1.0
 # Nearest-fill distance cutoff, in units of canonical grid dx. Off-
-# hull cells whose nearest native point is farther than this get
-# masked (left at 0) instead of filled. Motivation: rim regions have
-# sparse native coverage AND under-shooting Delaunay hull; unrestricted
-# nearest-fill pulls anomalous values from distant native points and
-# manifests as a visible kink in u_z(r) near r=1 (verified by
-# scripts/diagnose_rim_kink.py on firehorse1_and_2 -- raw native
-# points are smooth, canonical is kinky). 3 grid cells is the
-# smallest value that still fills the small in-disk-but-off-hull
-# regions in the interior; anything larger starts inviting rim
-# artifacts back in.
-_NEAREST_FILL_MAX_DIST = 3.0
+# hull cells whose nearest native point is farther than this are
+# masked (left at 0) instead of filled. Set to a large number
+# (effectively disabled) here so ALL in-disk-but-off-hull cells get
+# nearest-fill -- reproducing pre-mask loader behavior. Turn this
+# down (e.g. 3.0) only if you have hard evidence that nearest-fill
+# is producing wrong values at distant natives; do NOT use it as a
+# blunt instrument to hide rim behavior.
+_NEAREST_FILL_MAX_DIST = 1.0e6
 _PARALLEL_MIN = 32
 _QUARTER_TOL = 1e-6   # native x/y allowed slightly negative due to float roundoff
 
@@ -999,9 +995,11 @@ def load_dataset(path, nx: int = 128, ny: int = 128, nt: int = 300,
     suffix = "" if drop_first_steps == 0 else f"_drop{drop_first_steps}"
     if _DISK_MASK_R_END != 1.0:
         suffix += f"_r{_DISK_MASK_R_END:.4g}".replace(".", "p")
-    # Bump when nearest-fill semantics change so old caches never
-    # HIT with wrong data.
-    suffix += f"_nf{_NEAREST_FILL_MAX_DIST:.1f}".replace(".", "p")
+    # Only tag the filename when nearest-fill actually clips
+    # (threshold small enough to affect behavior). When effectively
+    # disabled (>= 100 grid cells) leave the name alone.
+    if _NEAREST_FILL_MAX_DIST < 100:
+        suffix += f"_nf{_NEAREST_FILL_MAX_DIST:.1f}".replace(".", "p")
     cache_path = folder / f"{_CACHE_PREFIX}{nx}x{ny}x{nt}{suffix}.npz"
 
     for stale in folder.glob(f"{_CACHE_PREFIX}*.tmp.npz"):
