@@ -123,6 +123,25 @@ def main() -> int:
         canon_finals[th] = km[:, -1]
     r_axis_canon = np.linspace(0.0, 1.0, n_r_dense)
 
+    # Diagnostic printout: canonical value at specific r along
+    # theta=45 deg, so we can tell "kink from nearest-fill bug" apart
+    # from "bilinear mask-transition band".
+    print(f"\n[C] canonical values along theta=45 deg (via bilinear "
+          f"sampler):", flush=True)
+    canon_45 = canon_finals[45.0]
+    for r_query in (0.90, 0.93, 0.95, 0.97, 0.98, 0.985, 0.99,
+                     0.993, 0.995, 0.999):
+        v = float(np.interp(r_query, r_axis_canon, canon_45))
+        print(f"    r={r_query:.3f}   u_z={v * args.value_scale:8.2f} "
+              f"({v:.3e} m)", flush=True)
+    print(f"  If u_z drops from ~-155 to 0 within r=[0.985, 0.995],\n"
+          f"  the 'straight line' is just bilinear mask transition\n"
+          f"  (i.e., loader working correctly, just visual artifact).\n"
+          f"  If u_z at r=0.95 or r=0.97 is CLOSER TO 0 than "
+          f"expected\n  (e.g. -100 instead of -150), nearest-fill "
+          f"IS misfiring and\n  needs deeper investigation.\n",
+          flush=True)
+
     # Filter native points into 3 angular bands
     bands = {}
     for th in (0.0, 45.0, 90.0):
