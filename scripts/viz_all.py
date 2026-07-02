@@ -307,7 +307,7 @@ def main() -> int:
             import shutil as _shutil
             import tempfile as _tempfile
             # Sensor positions (lab rig default)
-            positions = ((1.0, 0.0), (1.0, 45.0), (1.0, 90.0))
+            positions = ((0.95, 0.0), (0.95, 45.0), (0.95, 90.0))
             scfg = SensorConfig(n=3, strategy="custom",
                                 positions=positions)
             sensor_xy = place_sensors(scfg)

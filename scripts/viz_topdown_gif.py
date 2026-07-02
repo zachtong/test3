@@ -334,7 +334,7 @@ def main() -> int:
     print(f"loaded {sim_id}: canonical {sim.f.shape}", flush=True)
 
     if args.sensors == "3-edge":
-        positions = ((1.0, 0.0), (1.0, 45.0), (1.0, 90.0))
+        positions = ((0.95, 0.0), (0.95, 45.0), (0.95, 90.0))
     else:
         positions = tuple(
             tuple(float(x) for x in p.split(":"))

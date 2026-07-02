@@ -32,10 +32,15 @@ pod:
 sensors:
   n: 3
   strategy: custom
+  # r=0.95 (NOT 1.0) so sensors sit INSIDE the loader's rim mask
+  # (r <= 0.99). Sensors at r=1.0 would read u_z=0 forever after the
+  # rim tighten and the model would learn nothing. Lab rig can place
+  # real sensors anywhere at r < 0.99; we chose 0.95 as a reasonable
+  # in-disk edge that still has signal.
   positions:
-    - [1.0, 0.0]      # +X edge
-    - [1.0, 45.0]     # +D edge
-    - [1.0, 90.0]     # +Y edge
+    - [0.95, 0.0]     # +X near-edge
+    - [0.95, 45.0]    # +D near-edge
+    - [0.95, 90.0]    # +Y near-edge
 
 model:
   arch: bitcn

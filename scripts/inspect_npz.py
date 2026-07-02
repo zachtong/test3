@@ -678,7 +678,7 @@ def main() -> int:
     if not args.no_figures:
         from core.sensors import SensorConfig, place_sensors    # noqa: E402
         scfg = SensorConfig(n=3, strategy="custom",
-                            positions=((1.0, 0.0), (1.0, 45.0), (1.0, 90.0)))
+                            positions=((0.95, 0.0), (0.95, 45.0), (0.95, 90.0)))
         xy = place_sensors(scfg)
         out_root = (Path(args.out_dir) if args.out_dir
                     else folder.parent / "inspect_out")

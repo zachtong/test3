@@ -71,7 +71,7 @@ def test_sensor_extract_and_pod(fixture_folder):
                               cache=False, workers=1)
     x, y = canonical_grid(nx, ny)
     scfg = SensorConfig(n=3, strategy="custom",
-                        positions=((1.0, 0.0), (1.0, 45.0), (1.0, 90.0)))
+                        positions=((0.95, 0.0), (0.95, 45.0), (0.95, 90.0)))
     xy = place_sensors(scfg)
     ij = sensor_indices(xy, x, y)
     # Sensor traces: (B, n, Nt)
