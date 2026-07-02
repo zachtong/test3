@@ -288,9 +288,18 @@ def _render_radial_anim(out_path, *, w_true_m, w_pred_m,
 
     n_r = w_true_m.shape[0]
     nt = w_true_m.shape[-1]
-    # Sample only inside the loader's rim mask so the curve does not
-    # dip back to zero at r ~ 1.0 (which the loader zeroes).
-    r_stop = _DISK_MASK_R_END
+    # Stop sampling a few grid cells BEFORE the mask boundary. Sampling
+    # right up to _DISK_MASK_R_END exposes the bilinear transition
+    # band where 3 of 4 corners are inside the mask (real value ~-160)
+    # and 1 corner is masked (0). The bilinear average produces a
+    # linear ramp from -160 to 0 across the last ~2 grid cells,
+    # visible as a 'straight-line kink' even though the underlying
+    # canonical grid values are all correct. Trimming 3*dx keeps the
+    # sample points fully inside the mask so no zero corners get
+    # averaged in.
+    nx = w_true_m.shape[0]
+    grid_dx = 1.0 / max(nx - 1, 1)
+    r_stop = _DISK_MASK_R_END - 3.0 * grid_dx
     gts = [_sample_radial_kymograph(
         w_true_m.astype(np.float64), x_canon, y_canon, th,
         n_r=n_r, r_max=r_stop)
@@ -640,9 +649,12 @@ def _render_kymo_compare(out_path, *, w_true_m, w_pred_m, x_canon,
     import matplotlib.pyplot as plt
 
     n_r = w_true_m.shape[0]
-    # Sample only inside the loader's rim mask so kymo does not show
-    # a hard 0-line at r ~ 1.0.
-    r_stop = _DISK_MASK_R_END
+    # Stop 3 grid cells short of the mask boundary to avoid the
+    # bilinear transition band showing as a straight-line ramp; see
+    # _render_radial_anim for the derivation.
+    nx = w_true_m.shape[0]
+    grid_dx = 1.0 / max(nx - 1, 1)
+    r_stop = _DISK_MASK_R_END - 3.0 * grid_dx
     kymos_gt = [_sample_radial_kymograph(
         w_true_m.astype(np.float64), x_canon, y_canon, th,
         n_r=n_r, r_max=r_stop)
