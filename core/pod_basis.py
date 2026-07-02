@@ -196,14 +196,39 @@ class PODBasis:
         return cls(Phi=Phi, sigma=sigma, spatial_shape=(nx, ny))
 
     def project_sim(self, sim: Simulation) -> np.ndarray:
-        """Return a (K, Nt): lab-frame projection of one sim's field."""
+        """Return a (K, Nt): lab-frame projection of one sim's field.
+
+        Perf note: we intentionally do NOT do astype(float64) on
+        sim.f -- that would allocate a 39 MB temp per call (128*128
+        *300 * 8 bytes), which is memory-bandwidth-bound and stalls
+        for thousands of sims. numpy.matmul upcasts on the fly when
+        one input is float64 (Phi) and the other is float32 (sim.f),
+        without producing a full-size intermediate.
+        """
         nx, ny = self.spatial_shape
-        F = np.asarray(sim.f, dtype=np.float64).reshape(nx * ny, -1)
+        F = sim.f.reshape(nx * ny, -1)          # native dtype, no copy
         return self.Phi.T @ F
 
-    def project_ensemble(self, sims: Iterable[Simulation]) -> np.ndarray:
-        """Stack to (N_sim, K, Nt)."""
-        return np.stack([self.project_sim(s) for s in sims], axis=0)
+    def project_ensemble(self, sims,
+                          progress_every: int = 500) -> np.ndarray:
+        """Stack to (N_sim, K, Nt). Prints a heartbeat every
+        `progress_every` sims so long ensembles are diagnosable."""
+        import time
+        sims = list(sims)
+        n = len(sims)
+        out = []
+        t0 = time.time()
+        last = t0
+        for i, s in enumerate(sims, 1):
+            out.append(self.project_sim(s))
+            now = time.time()
+            if progress_every and (i % progress_every == 0 or i == n):
+                rate = i / max(now - t0, 1e-9)
+                eta = (n - i) / max(rate, 1e-9)
+                print(f"  project_ensemble: {i}/{n}  "
+                      f"({rate:.1f}/s  ETA {eta:.1f}s)", flush=True)
+                last = now
+        return np.stack(out, axis=0)
 
     def reconstruct(self, a: np.ndarray) -> np.ndarray:
         """Inverse map a(K, Nt) -> f(Nx, Ny, Nt). `rb` is intentionally absent

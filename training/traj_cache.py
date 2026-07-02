@@ -107,7 +107,8 @@ def save_traj(path: Path, data: dict) -> None:
     tmp.replace(path)
 
 
-def compute_test_field_norms(test_sims, a_test: np.ndarray
+def compute_test_field_norms(test_sims, a_test: np.ndarray,
+                              progress_every: int = 500
                               ) -> tuple[np.ndarray, np.ndarray]:
     """Precompute the scalar norms scorer needs:
 
@@ -118,12 +119,27 @@ def compute_test_field_norms(test_sims, a_test: np.ndarray
     + ||f_perp||^2, so f_perp_sq = ||f_true||^2 - ||a_test||^2.
 
     Both are (n_test,) float64.
+
+    Perf note: `np.einsum('ijk,ijk->', s.f, s.f, dtype=np.float64)`
+    accumulates in float64 without allocating a 39 MB float64 temp
+    per call. Prior implementation did `np.asarray(s.f, float64)`
+    which stalled the loop on memory bandwidth for large ensembles.
     """
+    import time
     n = len(test_sims)
     f_true_sq = np.empty(n, dtype=np.float64)
+    t0 = time.time()
     for i, s in enumerate(test_sims):
-        arr = np.asarray(s.f, dtype=np.float64)
-        f_true_sq[i] = float(np.sum(arr * arr))
-    a_norm_sq = np.sum(a_test.astype(np.float64) ** 2, axis=(1, 2))
+        f_true_sq[i] = float(np.einsum("ijk,ijk->",
+                                         s.f, s.f, dtype=np.float64))
+        if progress_every and ((i + 1) % progress_every == 0
+                                 or i == n - 1):
+            elapsed = time.time() - t0
+            rate = (i + 1) / max(elapsed, 1e-9)
+            eta = (n - i - 1) / max(rate, 1e-9)
+            print(f"  f_norms: {i + 1}/{n}  "
+                  f"({rate:.1f}/s  ETA {eta:.1f}s)", flush=True)
+    a_norm_sq = np.einsum("ijk,ijk->i", a_test, a_test,
+                           dtype=np.float64)
     f_perp_sq = np.maximum(f_true_sq - a_norm_sq, 0.0)
     return f_true_sq, f_perp_sq
