@@ -90,7 +90,7 @@ def test_cache_roundtrip(fixture_folder):
     nx, ny, nt = 32, 32, 16
     x1, y1, sims_a = load_dataset(fixture_folder, nx=nx, ny=ny, nt=nt,
                                   cache=True, workers=1)
-    cache_path = fixture_folder / f"_loader_cache_{nx}x{ny}x{nt}_r0p99.npz"
+    cache_path = fixture_folder / f"_loader_cache_{nx}x{ny}x{nt}_r0p99_nf3p0.npz"
     assert cache_path.exists()
     x2, y2, sims_b = load_dataset(fixture_folder, nx=nx, ny=ny, nt=nt,
                                   cache=True, workers=1)
@@ -287,8 +287,8 @@ def test_drop_first_steps(tmp_path):
                            workers=1, drop_first_steps=0)
     _, _, _ = load_dataset(folder, nx=16, ny=16, nt=8, cache=True,
                            workers=1, drop_first_steps=1)
-    assert (folder / "_loader_cache_16x16x8_r0p99.npz").exists()
-    assert (folder / "_loader_cache_16x16x8_drop1_r0p99.npz").exists()
+    assert (folder / "_loader_cache_16x16x8_r0p99_nf3p0.npz").exists()
+    assert (folder / "_loader_cache_16x16x8_drop1_r0p99_nf3p0.npz").exists()
 
 
 def test_drop_first_steps_too_many_raises(tmp_path):
@@ -524,7 +524,7 @@ def test_cache_records_skip_log(tmp_path):
     x1, y1, sims_a = load_dataset(folder, nx=16, ny=16, nt=8,
                                   cache=True, workers=1)
     assert len(sims_a) == 1
-    cache_path = folder / "_loader_cache_16x16x8_r0p99.npz"
+    cache_path = folder / "_loader_cache_16x16x8_r0p99_nf3p0.npz"
     assert cache_path.exists()
     with np.load(cache_path, allow_pickle=True) as z:
         assert "skipped_files" in z.files

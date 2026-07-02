@@ -72,6 +72,18 @@ _CACHE_PREFIX = "_loader_cache_"
 # the model's training loss. Downstream viz treats them the same way
 # as physical off-disk cells.
 _DISK_MASK_R_END = 0.99
+# Nearest-fill distance cutoff, in units of canonical grid dx. Off-
+# hull cells whose nearest native point is farther than this get
+# masked (left at 0) instead of filled. Motivation: rim regions have
+# sparse native coverage AND under-shooting Delaunay hull; unrestricted
+# nearest-fill pulls anomalous values from distant native points and
+# manifests as a visible kink in u_z(r) near r=1 (verified by
+# scripts/diagnose_rim_kink.py on firehorse1_and_2 -- raw native
+# points are smooth, canonical is kinky). 3 grid cells is the
+# smallest value that still fills the small in-disk-but-off-hull
+# regions in the interior; anything larger starts inviting rim
+# artifacts back in.
+_NEAREST_FILL_MAX_DIST = 3.0
 _PARALLEL_MIN = 32
 _QUARTER_TOL = 1e-6   # native x/y allowed slightly negative due to float roundoff
 
@@ -353,6 +365,8 @@ def _interp_rows(x_new: np.ndarray, x_old: np.ndarray,
 def _precompute_bary(xy_native: np.ndarray,
                      grid_pts: np.ndarray,
                      in_disk_flat: np.ndarray | None = None,
+                     x_canon: np.ndarray | None = None,
+                     y_canon: np.ndarray | None = None,
                      ) -> tuple[np.ndarray, np.ndarray, np.ndarray,
                                 np.ndarray, np.ndarray]:
     """Delaunay-based barycentric weights + nearest-neighbour edge fill.
@@ -400,15 +414,44 @@ def _precompute_bary(xy_native: np.ndarray,
     vertices = tri.simplices[simplex_safe]                       # (Nq, 3)
 
     # Nearest-neighbour fallback for in-disk-but-off-hull cells.
+    # Reject fills whose nearest native point is FAR (> few grid dx):
+    # near the rim the Delaunay hull tends to under-shoot AND native
+    # points are sparse, so the "nearest" native for an off-hull
+    # canonical cell may be several grid cells away. Filling with
+    # that value produces a non-physical kink (verified via
+    # scripts/diagnose_rim_kink.py). Cells with too-far nearest are
+    # instead left at 0 (same as physical off-disk); the effective
+    # mask becomes adaptive: dense-native regions get filled, sparse-
+    # native rim regions get masked. Threshold: _NEAREST_FILL_MAX_DIST
+    # (default 3 grid cells).
     if in_disk_flat is None:
-        fill_target = ~inside
+        candidate_target = ~inside
     else:
-        fill_target = (~inside) & in_disk_flat
+        candidate_target = (~inside) & in_disk_flat
+    fill_target = np.zeros_like(candidate_target)
     fill_src = np.zeros(grid_pts.shape[0], dtype=np.int64)
-    if fill_target.any():
+    if candidate_target.any():
+        # Distance cutoff in normalized-grid units. dx / dy fall back
+        # to a small default if the canonical axes were not supplied.
+        if x_canon is not None and len(x_canon) > 1:
+            grid_dx = float(x_canon[-1] - x_canon[0]) / max(
+                len(x_canon) - 1, 1)
+        else:
+            grid_dx = 1.0 / 128
+        if y_canon is not None and len(y_canon) > 1:
+            grid_dy = float(y_canon[-1] - y_canon[0]) / max(
+                len(y_canon) - 1, 1)
+        else:
+            grid_dy = 1.0 / 128
+        d_max = _NEAREST_FILL_MAX_DIST * max(grid_dx, grid_dy)
         kd = cKDTree(xy_native)
-        _, nn = kd.query(grid_pts[fill_target], k=1)
-        fill_src[fill_target] = nn
+        dist, nn = kd.query(grid_pts[candidate_target], k=1)
+        keep = dist <= d_max
+        # Set fill_target only where keep is True
+        cand_idx = np.where(candidate_target)[0]
+        kept_idx = cand_idx[keep]
+        fill_target[kept_idx] = True
+        fill_src[kept_idx] = nn[keep]
     return vertices, weights, inside, fill_target, fill_src
 
 
@@ -562,7 +605,8 @@ def _build_one(args):
             xy_native = np.maximum(xy_native, 0.0)
 
             vertices, weights, inside, fill_tgt, fill_src = _precompute_bary(
-                xy_native, grid_pts, in_disk_flat=in_disk_flat)
+                xy_native, grid_pts, in_disk_flat=in_disk_flat,
+                x_canon=x_canon, y_canon=y_canon)
 
             disp_all = np.asarray(
                 z[f"{prefix}_displacement_z_corrected_upper"]
@@ -955,6 +999,9 @@ def load_dataset(path, nx: int = 128, ny: int = 128, nt: int = 300,
     suffix = "" if drop_first_steps == 0 else f"_drop{drop_first_steps}"
     if _DISK_MASK_R_END != 1.0:
         suffix += f"_r{_DISK_MASK_R_END:.4g}".replace(".", "p")
+    # Bump when nearest-fill semantics change so old caches never
+    # HIT with wrong data.
+    suffix += f"_nf{_NEAREST_FILL_MAX_DIST:.1f}".replace(".", "p")
     cache_path = folder / f"{_CACHE_PREFIX}{nx}x{ny}x{nt}{suffix}.npz"
 
     for stale in folder.glob(f"{_CACHE_PREFIX}*.tmp.npz"):

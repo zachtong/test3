@@ -67,7 +67,7 @@ def _stats_cache_key(folder: Path, nx: int, ny: int, nt: int,
     automatically. Rim mask r_end is imported live from the loader
     so any change to _DISK_MASK_R_END auto-invalidates the cache
     (values behind the mask change, so std / mean change)."""
-    from data.loader import _DISK_MASK_R_END
+    from data.loader import _DISK_MASK_R_END, _NEAREST_FILL_MAX_DIST
     key = json.dumps({
         "version": _STATS_CACHE_VERSION,
         "folder": str(folder.resolve()),
@@ -75,6 +75,7 @@ def _stats_cache_key(folder: Path, nx: int, ny: int, nt: int,
         "drop_first_steps": int(drop_first_steps),
         "limit": None if limit is None else int(limit),
         "rim_r_end": float(_DISK_MASK_R_END),
+        "nf_max_dist": float(_NEAREST_FILL_MAX_DIST),
     }, sort_keys=True).encode()
     return hashlib.sha256(key).hexdigest()[:8]
 

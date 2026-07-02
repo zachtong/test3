@@ -41,10 +41,10 @@ def _key_raw(npz_dir, nx, ny, nt, x_end, y_end, drop_first_steps,
     to _DISK_MASK_R_END auto-invalidates the basis cache (fitting a
     basis on data that used the OLD rim mask would produce different
     modes; we must NOT HIT the old file after the tighten)."""
-    from data.loader import _DISK_MASK_R_END
+    from data.loader import _DISK_MASK_R_END, _NEAREST_FILL_MAX_DIST
     raw = (f"pod3d|{npz_dir}|{nx}|{ny}|{nt}|{x_end}|{y_end}|"
            f"{drop_first_steps}|{seed}|{train_frac}|{val_frac}|"
-           f"{n_fit}|rim={_DISK_MASK_R_END}")
+           f"{n_fit}|rim={_DISK_MASK_R_END}|nf={_NEAREST_FILL_MAX_DIST}")
     return hashlib.sha256(raw.encode()).hexdigest()[:16]
 
 
