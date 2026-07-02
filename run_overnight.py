@@ -30,6 +30,8 @@ subprocess.run([
     "--tag", "firehorse1_and_2_clean",
     "--show-lower",
     "--exclude", "interactive",
+    "--n-samples", "2",       # per-sim viz count: 3 -> 2
+    "--topn-worst", "2",      # worst-N sims: 5 -> 2
 ], check=True)
 
 # --- 3. viz_test_cases ---
@@ -38,7 +40,7 @@ subprocess.run([
     "--tag", "firehorse1_and_2_clean",
     "--out", "viz/firehorse1_and_2_clean/all_picks/",
     "--pick", "worst,best,median,random",
-    "--topn", "10",
+    "--topn", "2",            # per-pick sims: 10 -> 2
     "--layout", "snapshot,kymo,radial_anim,interactive_compare",
     "--show-lower",
 ], check=True)
