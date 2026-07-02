@@ -53,17 +53,24 @@ _FRONT_COLOR = SENSOR_PALETTE[6]
 
 def _sample_radial_kymograph(f: np.ndarray, x_canon: np.ndarray,
                              y_canon: np.ndarray, theta_deg: float,
-                             n_r: int = 128) -> np.ndarray:
+                             n_r: int = 128,
+                             r_max: float = 1.0) -> np.ndarray:
     """Bilinear-sample f along the radial ray at theta_deg.
 
-    Returns (n_r, Nt) -- value of f at r in [0, 1] (n_r samples) and
-    every canonical time step. Off-canonical-grid points (the ray may
-    not align with grid columns) are interpolated; r values outside the
-    canonical extent are clipped to the boundary value via np.interp's
-    edge clamp on each axis.
+    Returns (n_r, Nt) -- value of f at r in [0, r_max] (n_r samples)
+    and every canonical time step. Off-canonical-grid points (the ray
+    may not align with grid columns) are interpolated; r values
+    outside the canonical extent are clipped to the boundary value
+    via np.interp's edge clamp on each axis.
+
+    r_max default is 1.0 for backward compatibility with diagnostic
+    callers (e.g. inspect_gt_quality) that need to sample the full
+    disk including the loader-zeroed rim shell. Rendering callers
+    should pass r_max = _DISK_MASK_R_END from data.loader so their
+    curves do not dip back to zero at the rim.
     """
     nx, ny, nt = f.shape
-    rs = np.linspace(0.0, 1.0, n_r)
+    rs = np.linspace(0.0, r_max, n_r)
     t = np.deg2rad(theta_deg)
     xs = rs * np.cos(t)
     ys = rs * np.sin(t)

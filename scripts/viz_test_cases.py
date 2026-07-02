@@ -280,6 +280,7 @@ def _render_radial_anim(out_path, *, w_true_m, w_pred_m,
     Output: GIF (PillowWriter, no ffmpeg needed).
     """
     from scripts.viz_radial_kymograph import _sample_radial_kymograph
+    from data.loader import _DISK_MASK_R_END
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
@@ -287,11 +288,16 @@ def _render_radial_anim(out_path, *, w_true_m, w_pred_m,
 
     n_r = w_true_m.shape[0]
     nt = w_true_m.shape[-1]
+    # Sample only inside the loader's rim mask so the curve does not
+    # dip back to zero at r ~ 1.0 (which the loader zeroes).
+    r_stop = _DISK_MASK_R_END
     gts = [_sample_radial_kymograph(
-        w_true_m.astype(np.float64), x_canon, y_canon, th, n_r=n_r)
+        w_true_m.astype(np.float64), x_canon, y_canon, th,
+        n_r=n_r, r_max=r_stop)
         for th in angles]
     prs = [_sample_radial_kymograph(
-        w_pred_m.astype(np.float64), x_canon, y_canon, th, n_r=n_r)
+        w_pred_m.astype(np.float64), x_canon, y_canon, th,
+        n_r=n_r, r_max=r_stop)
         for th in angles]
     scaled_gts = [g * value_scale for g in gts]
     scaled_prs = [p * value_scale for p in prs]
@@ -309,7 +315,7 @@ def _render_radial_anim(out_path, *, w_true_m, w_pred_m,
         frame_idx = np.linspace(0, nt - 1, max_frames).astype(int)
     else:
         frame_idx = np.arange(nt)
-    r_axis = np.linspace(0.0, 1.0, n_r)
+    r_axis = np.linspace(0.0, r_stop, n_r)
 
     fig, axes = plt.subplots(
         1, len(angles),
@@ -630,14 +636,20 @@ def _render_kymo_compare(out_path, *, w_true_m, w_pred_m, x_canon,
     for micrometres) is applied inside for display + colorbar labels.
     """
     from scripts.viz_radial_kymograph import _sample_radial_kymograph
+    from data.loader import _DISK_MASK_R_END
     import matplotlib.pyplot as plt
 
     n_r = w_true_m.shape[0]
+    # Sample only inside the loader's rim mask so kymo does not show
+    # a hard 0-line at r ~ 1.0.
+    r_stop = _DISK_MASK_R_END
     kymos_gt = [_sample_radial_kymograph(
-        w_true_m.astype(np.float64), x_canon, y_canon, th, n_r=n_r)
+        w_true_m.astype(np.float64), x_canon, y_canon, th,
+        n_r=n_r, r_max=r_stop)
         for th in angles]
     kymos_pr = [_sample_radial_kymograph(
-        w_pred_m.astype(np.float64), x_canon, y_canon, th, n_r=n_r)
+        w_pred_m.astype(np.float64), x_canon, y_canon, th,
+        n_r=n_r, r_max=r_stop)
         for th in angles]
     scaled_gt = [k * value_scale for k in kymos_gt]
     scaled_pr = [k * value_scale for k in kymos_pr]
@@ -654,7 +666,7 @@ def _render_kymo_compare(out_path, *, w_true_m, w_pred_m, x_canon,
 
     nt = w_true_m.shape[-1]
     t_axis = np.linspace(0.0, 1.0, nt)
-    r_axis = np.linspace(0.0, 1.0, n_r)
+    r_axis = np.linspace(0.0, r_stop, n_r)
     n_rows = len(angles)
     fig, axes = plt.subplots(n_rows, 3,
                               figsize=(12.0, 3.0 * n_rows + 0.6),
