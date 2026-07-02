@@ -21,17 +21,19 @@ subprocess.run([
 ], check=True)
 
 # --- 2. viz_all ---
-# Skip the interactive HTML: it needs WebGL to view (broken on this
-# Linux) and gif_3d + radial_anim + kymo cover the same info.
+# Skip the interactive HTML (needs WebGL, broken on this Linux;
+# gif_3d + radial_anim + kymo cover the same info).
+# Skip worst too: step 3 runs viz_test_cases with all 4 picks and
+# batches them into ONE predict_run_fields call (= one F read).
+# Letting viz_all also run worst here would fire a SECOND F read.
 subprocess.run([
     PY, "scripts/viz_all.py",
     "--npz-dir", "/data/3D_wafer_bonding/sim_dataset_big_firehorse_1_and_2/",
     "--out", "viz/firehorse1_and_2_r95",
     "--tag", "firehorse1_and_2_r95",
     "--show-lower",
-    "--exclude", "interactive",
+    "--exclude", "interactive,worst",
     "--n-samples", "2",       # per-sim viz count: 3 -> 2
-    "--topn-worst", "2",      # worst-N sims: 5 -> 2
 ], check=True)
 
 # --- 3. viz_test_cases ---
