@@ -29,12 +29,16 @@ from training.loop import train_one_seed
 from training.checkpoint import (checkpoint_path, history_path, latest_path,
                                   save_checkpoint, load_checkpoint)
 from training.normalization import save_norm_stats
-from training.basis_cache import load_or_fit_basis
+from training.basis_cache import load_or_fit_basis, load_cached_basis
+from training.traj_cache import (_traj_key, traj_cache_path,
+                                   try_load_traj, save_traj,
+                                   compute_test_field_norms)
 from core.sensors import SensorConfig
 from data.loader import load_dataset
 from data.splitter import split_dataset
 from models import create_model
-from evaluation.scorer import evaluate_ensemble
+from evaluation.scorer import (evaluate_ensemble,
+                                 evaluate_from_cached_norms)
 
 
 def pick_device() -> torch.device:
@@ -83,55 +87,133 @@ def main() -> None:
             "data.npz_dir is required. The 3D pipeline has no synthetic "
             "fallback yet; point at a converted-NPZ folder.")
 
-    # data
-    t0 = time.time()
-    x_canon, y_canon, sims = load_dataset(
-        cfg.data.npz_dir, nx=cfg.data.nx, ny=cfg.data.ny, nt=cfg.data.nt,
-        x_end=cfg.data.x_end, y_end=cfg.data.y_end, limit=cfg.data.limit,
-        workers=cfg.data.workers,
-        drop_first_steps=cfg.data.drop_first_steps)
-    print(f"data: {len(sims)} sims ({time.time() - t0:.1f}s)")
+    # Trajectory-level cache. Everything training + scoring needs
+    # (sensor traces, POD projections, and the two scalar-per-test-sim
+    # norms scorer uses via Parseval) fits in ~66 MB. A HIT skips the
+    # 93 GB F reload from load_dataset entirely -- next-day retrains
+    # after a rebooted server take seconds to reach the model loop
+    # instead of dozens of minutes. Cache key covers every param that
+    # changes y or a (npz_dir + grid + drop + split + rim mask +
+    # sensor positions + K); ANY of those changing forces a rebuild.
+    scfg = SensorConfig(n=cfg.sensors.n, strategy=cfg.sensors.strategy,
+                        positions=cfg.sensors.positions)
+    traj_k = _traj_key(
+        cfg.data.npz_dir, cfg.data.nx, cfg.data.ny, cfg.data.nt,
+        cfg.data.x_end, cfg.data.y_end, cfg.data.drop_first_steps,
+        cfg.data.seed, cfg.data.train_frac, cfg.train.val_frac,
+        cfg.sensors.positions, cfg.pod.k)
+    traj_path = traj_cache_path(cfg.basis_cache_dir, traj_k)
+    traj = None if cfg.pod.force_refit else try_load_traj(traj_path)
 
-    split = split_dataset(sims, train_frac=cfg.data.train_frac,
-                          val_frac=cfg.train.val_frac, seed=cfg.data.seed)
-    train_sims = split["train_sims"]
-    val_sims = split["val_sims"]
-    test_sims = split["test_sims"]
-    print(f"split: {len(train_sims)}/{len(val_sims)}/{len(test_sims)}")
+    if traj is not None:
+        print(f"trajectory cache HIT -> {traj_path.name} "
+              f"(skipping load_dataset + build_trajectory_dataset)")
+        x_canon = traj["x_canon"]; y_canon = traj["y_canon"]
+        n_train = traj["n_train"]
+        # Build the same dict shape build_trajectory_dataset returns
+        # so downstream code (normalize_dataset) is unchanged.
+        ds_tr_raw = dict(sensor_xy=traj["sensor_xy"], s_ij=traj["s_ij"],
+                          y=traj["y_train_val"],
+                          a=traj["a_train_val"],
+                          target=traj["a_train_val"])
+        ds_te_raw = dict(sensor_xy=traj["sensor_xy"], s_ij=traj["s_ij"],
+                          y=traj["y_test"], a=traj["a_test"],
+                          target=traj["a_test"])
+        test_basenames = traj["test_basenames"]
+        test_f_true_sq_norm = traj["test_f_true_sq_norm"]
+        test_f_perp_sq_norm = traj["test_f_perp_sq_norm"]
+        # Basis still needed for weight_scheme sigma calculation and
+        # any downstream POD reconstruction. Load directly from the
+        # basis cache using n_fit from the traj cache (does not
+        # touch sims).
+        basis = load_cached_basis(
+            npz_dir=cfg.data.npz_dir, nx=cfg.data.nx, ny=cfg.data.ny,
+            nt=cfg.data.nt, x_end=cfg.data.x_end, y_end=cfg.data.y_end,
+            drop_first_steps=cfg.data.drop_first_steps,
+            seed=cfg.data.seed, train_frac=cfg.data.train_frac,
+            val_frac=cfg.train.val_frac,
+            n_fit=n_train + traj["n_val"],
+            cache_dir=cfg.basis_cache_dir, K=cfg.pod.k)
+        if basis is None:
+            raise SystemExit(
+                "trajectory cache HIT but its companion basis file is "
+                "missing from basis_cache. Delete traj_*.npz to force "
+                "a full rebuild.")
+        test_sims = None    # scoring will use cached norms
+        used_cache = True
+    else:
+        # data
+        t0 = time.time()
+        x_canon, y_canon, sims = load_dataset(
+            cfg.data.npz_dir, nx=cfg.data.nx, ny=cfg.data.ny,
+            nt=cfg.data.nt, x_end=cfg.data.x_end, y_end=cfg.data.y_end,
+            limit=cfg.data.limit, workers=cfg.data.workers,
+            drop_first_steps=cfg.data.drop_first_steps)
+        print(f"data: {len(sims)} sims ({time.time() - t0:.1f}s)")
 
-    # basis: lab-frame POD fit on (train + val), cached on disk so a
-    # re-run at the same data + split + grid + K reuses the SVD.
-    # k_cache > pod.k stores extra modes so future runs at any K <=
-    # k_cache also hit the cache without refitting.
-    basis = load_or_fit_basis(
-        train_sims + val_sims, K=cfg.pod.k,
-        npz_dir=cfg.data.npz_dir, nx=cfg.data.nx, ny=cfg.data.ny,
-        nt=cfg.data.nt, x_end=cfg.data.x_end, y_end=cfg.data.y_end,
-        drop_first_steps=cfg.data.drop_first_steps,
-        seed=cfg.data.seed, train_frac=cfg.data.train_frac,
-        val_frac=cfg.train.val_frac,
-        cache_dir=cfg.basis_cache_dir, k_cache=cfg.pod.k_cache,
-        force_refit=cfg.pod.force_refit,
-        workers=cfg.pod.workers)
+        split = split_dataset(
+            sims, train_frac=cfg.data.train_frac,
+            val_frac=cfg.train.val_frac, seed=cfg.data.seed)
+        train_sims = split["train_sims"]
+        val_sims = split["val_sims"]
+        test_sims = split["test_sims"]
+        n_train = len(train_sims)
+        print(f"split: {n_train}/{len(val_sims)}/{len(test_sims)}")
+
+        basis = load_or_fit_basis(
+            train_sims + val_sims, K=cfg.pod.k,
+            npz_dir=cfg.data.npz_dir, nx=cfg.data.nx, ny=cfg.data.ny,
+            nt=cfg.data.nt, x_end=cfg.data.x_end, y_end=cfg.data.y_end,
+            drop_first_steps=cfg.data.drop_first_steps,
+            seed=cfg.data.seed, train_frac=cfg.data.train_frac,
+            val_frac=cfg.train.val_frac,
+            cache_dir=cfg.basis_cache_dir, k_cache=cfg.pod.k_cache,
+            force_refit=cfg.pod.force_refit,
+            workers=cfg.pod.workers)
+
+        ds_tr_raw = build_trajectory_dataset(
+            train_sims + val_sims, x_canon, y_canon, basis, scfg)
+        ds_te_raw = build_trajectory_dataset(
+            test_sims, x_canon, y_canon, basis, scfg)
+        test_basenames = [s.params.get("basename", "")
+                           for s in test_sims]
+        # Compute the scalar-per-test-sim norms scorer needs so we
+        # can score without re-loading F next time.
+        test_f_true_sq_norm, test_f_perp_sq_norm = (
+            compute_test_field_norms(test_sims, ds_te_raw["a"]))
+        try:
+            save_traj(traj_path, dict(
+                x_canon=x_canon, y_canon=y_canon,
+                sensor_xy=ds_tr_raw["sensor_xy"],
+                s_ij=ds_tr_raw["s_ij"],
+                y_train_val=ds_tr_raw["y"],
+                a_train_val=ds_tr_raw["a"],
+                y_test=ds_te_raw["y"], a_test=ds_te_raw["a"],
+                test_f_true_sq_norm=test_f_true_sq_norm,
+                test_f_perp_sq_norm=test_f_perp_sq_norm,
+                test_basenames=test_basenames,
+                n_train=n_train, n_val=len(val_sims)))
+            print(f"  wrote trajectory cache -> "
+                  f"{traj_path.name} "
+                  f"(~{(traj_path.stat().st_size >> 20)} MB)")
+        except OSError as e:
+            print(f"  WARN: could not write trajectory cache "
+                  f"({type(e).__name__}: {e}); continuing")
+        used_cache = False
+
     print(f"POD K={cfg.pod.k}  sigma ratio="
           f"{(basis.sigma / basis.sigma[0]).round(4).tolist()}")
 
-    # datasets (sensor_cfg mirrors training.config.SensorConfig)
-    scfg = SensorConfig(n=cfg.sensors.n, strategy=cfg.sensors.strategy,
-                        positions=cfg.sensors.positions)
-    ds_tr = normalize_dataset(
-        build_trajectory_dataset(train_sims + val_sims, x_canon, y_canon,
-                                  basis, scfg), device=device)
+    ds_tr = normalize_dataset(ds_tr_raw, device=device)
     ds_te = normalize_dataset(
-        build_trajectory_dataset(test_sims, x_canon, y_canon, basis, scfg),
+        ds_te_raw,
         y_stats=ds_tr["y_stats"], target_stats=ds_tr["target_stats"],
         device=device)
     save_norm_stats(out_dir / "norm_stats.npz", ds_tr["y_stats"],
                     ds_tr["target_stats"])
 
-    n_tr = len(train_sims)
-    x_tr, y_tr = ds_tr["y_t"][:n_tr], ds_tr["target_t"][:n_tr]
-    x_vl, y_vl = ds_tr["y_t"][n_tr:], ds_tr["target_t"][n_tr:]
+    x_tr, y_tr = ds_tr["y_t"][:n_train], ds_tr["target_t"][:n_train]
+    x_vl, y_vl = ds_tr["y_t"][n_train:], ds_tr["target_t"][n_train:]
 
     weights = make_channel_weights(basis.sigma, cfg.train.weight_scheme,
                                    with_front=False).to(device)
@@ -161,9 +243,18 @@ def main() -> None:
         models.append(model)
 
     # eval
-    result = evaluate_ensemble(
-        models, ds_te["y_t"], test_sims, basis,
-        ds_tr["target_stats"], cfg)
+    if used_cache:
+        # Score via cached f-norms + a_true; no F needed.
+        a_test_true_np = ds_te_raw["a"].astype(np.float64)
+        result = evaluate_from_cached_norms(
+            models, ds_te["y_t"], a_test_true_np,
+            test_f_true_sq_norm, test_f_perp_sq_norm,
+            test_basenames, basis.sigma,
+            ds_tr["target_stats"], cfg)
+    else:
+        result = evaluate_ensemble(
+            models, ds_te["y_t"], test_sims, basis,
+            ds_tr["target_stats"], cfg)
     result.save_json(out_dir / "results.json")
 
     g = result.global_stats

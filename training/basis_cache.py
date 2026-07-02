@@ -86,6 +86,34 @@ def _make(Phi, sigma, spatial_shape) -> PODBasis:
                     spatial_shape=tuple(int(d) for d in spatial_shape))
 
 
+def load_cached_basis(*, npz_dir, nx, ny, nt, x_end, y_end,
+                       drop_first_steps, seed, train_frac, val_frac,
+                       n_fit, cache_dir, K: int) -> PODBasis | None:
+    """Load an existing pod3d cache file without needing the sims
+    list. Returns None if no compatible cache exists. Tries the
+    resolved-npz_dir key first, then falls back to the legacy raw
+    key (mirrors load_or_fit_basis's fallback ordering)."""
+    cache_dir = Path(cache_dir)
+    resolved_key = _key(npz_dir, nx, ny, nt, x_end, y_end,
+                          drop_first_steps, seed, train_frac,
+                          val_frac, n_fit)
+    legacy_key = _key_raw(npz_dir, nx, ny, nt, x_end, y_end,
+                           drop_first_steps, seed, train_frac,
+                           val_frac, n_fit)
+    for key in (resolved_key, legacy_key):
+        path = cache_dir / f"pod3d_{key}.npz"
+        if not path.exists():
+            continue
+        try:
+            with np.load(path, allow_pickle=False) as z:
+                if int(z["k_cache"]) >= K:
+                    return _make(z["Phi"][:, :K], z["sigma"][:K],
+                                  z["spatial_shape"])
+        except (OSError, KeyError, ValueError):
+            continue
+    return None
+
+
 def load_or_fit_basis(sims, K: int, *, npz_dir, nx, ny, nt,
                       x_end, y_end, drop_first_steps,
                       seed, train_frac, val_frac,
