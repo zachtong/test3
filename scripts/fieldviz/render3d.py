@@ -25,6 +25,7 @@ import numpy as np
 
 from scripts.fieldviz import (mirror_d2, WAFER_CMAP,
                                SENSOR_MARKER_COLOR, SENSOR_PALETTE)
+from data.loader import _DISK_MASK_R_END
 
 
 DEFAULT_ELEV = 28.0
@@ -80,7 +81,10 @@ def render_3d_frame(ax, field_frame: np.ndarray,
     x_full = np.concatenate([-x_canon[:0:-1], x_canon])
     y_full = np.concatenate([-y_canon[:0:-1], y_canon])
     X, Y = np.meshgrid(x_full, y_full, indexing="ij")
-    off_disk = (X * X + Y * Y) > 1.0
+    # Mask at the loader's rim threshold (0.99 by default), NOT 1.0 --
+    # cells at r in (0.99, 1] are zeroed by the loader, so rendering
+    # them produces a sharp waterfall drop at the edge.
+    off_disk = (X * X + Y * Y) > _DISK_MASK_R_END * _DISK_MASK_R_END
 
     Z_upper = F_full * value_scale
     Z_upper[off_disk] = np.nan

@@ -408,7 +408,10 @@ def _render_interactive_compare(out_path, *, w_true_m, w_pred_m,
     x_full = np.concatenate([-x_canon[:0:-1], x_canon])
     y_full = np.concatenate([-y_canon[:0:-1], y_canon])
     X, Y = np.meshgrid(x_full, y_full, indexing="ij")
-    in_disk = (X * X + Y * Y) <= 1.0
+    # Match loader rim mask (0.99) so the interactive_compare view
+    # does not show a waterfall drop at r=1 where the loader zeroed.
+    from data.loader import _DISK_MASK_R_END
+    in_disk = (X * X + Y * Y) <= _DISK_MASK_R_END * _DISK_MASK_R_END
 
     def _mask_scale(w_3d):
         out = []

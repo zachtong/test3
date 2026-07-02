@@ -133,7 +133,10 @@ def main() -> int:
     y_full = np.concatenate([-y_canon[:0:-1], y_canon])
     X_full, Y_full = np.meshgrid(x_full, y_full, indexing="ij")
     R_full = np.sqrt(X_full ** 2 + Y_full ** 2)
-    in_disk = R_full <= 1.0
+    # Match loader rim mask (0.99) so we do not render the zeroed
+    # shell (r in (0.99, 1]) as a waterfall drop.
+    from data.loader import _DISK_MASK_R_END
+    in_disk = R_full <= _DISK_MASK_R_END
 
     # Build per-frame z-data (full disk, mask off-disk to NaN so
     # plotly draws nothing there).
