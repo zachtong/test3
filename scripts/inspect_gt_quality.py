@@ -62,8 +62,7 @@ _root = Path(__file__).resolve().parent.parent
 if str(_root) not in sys.path:
     sys.path.insert(0, str(_root))
 
-from data.loader import (load_dataset,                          # noqa: E402
-                          _DISK_MASK_R_END)
+from data.loader import load_dataset                            # noqa: E402
 from scripts.viz_radial_kymograph import _sample_radial_kymograph  # noqa: E402
 from scripts.fieldviz import (provenance_footer,                # noqa: E402
                                WAFER_CMAP, SENSOR_MARKER_COLOR)
@@ -180,12 +179,11 @@ def _radial_kink_stats(f: np.ndarray, x_canon: np.ndarray,
     Also stored: raw u_z values at the requested r_query points so
     the dumper can show the full curve shape without re-computing.
     """
-    # Only scan the UNMASKED range (r < _DISK_MASK_R_END). Cells
-    # beyond that are intentionally zeroed by the loader; treating
-    # them as a kink would confuse the metric with the mask itself.
-    # Leave a small epsilon so the very edge of the mask is not
-    # sampled (bilinear resampling can bleed the mask edge).
-    r_upper = max(0.0, _DISK_MASK_R_END - 0.005)
+    # Scan up to r=0.995 to stay clear of the arc where the mask-
+    # aware bilinear stencil in _sample_radial_kymograph has fewer
+    # than 4 in-disk corners and its finite-difference kink metric
+    # loses meaning.
+    r_upper = 0.995
     out = {}
     for th in angles:
         n_r = 512
@@ -196,14 +194,9 @@ def _radial_kink_stats(f: np.ndarray, x_canon: np.ndarray,
         inside_mask = r_axis_full <= r_upper
         final = final_full[inside_mask]
         r_axis = r_axis_full[inside_mask]
-        # r_query values in the masked shell (>= _DISK_MASK_R_END)
-        # will render as 0 by definition of the mask. Show them
-        # anyway so the dumper output reveals the mask working.
         vals = {r: float(np.interp(r, r_axis_full, final_full))
                  for r in r_query}
         if final.size == 0:
-            # Degenerate: mask covers everything. Should not happen
-            # unless _DISK_MASK_R_END was configured near 0.
             out[f"theta={th:g}"] = dict(
                 values_at_r=vals, rel_kink=0.0,
                 rise_from_min=0.0, r_of_min=0.0, r_of_kink=0.0,

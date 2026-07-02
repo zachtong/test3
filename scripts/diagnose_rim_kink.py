@@ -28,7 +28,7 @@ if str(_root) not in sys.path:
     sys.path.insert(0, str(_root))
 
 from data.loader import (load_dataset,                        # noqa: E402
-                          _DISK_MASK_R_END, _WAFER_RADIUS_M)
+                          _WAFER_RADIUS_M)
 from scripts.viz_radial_kymograph import _sample_radial_kymograph  # noqa: E402
 from scripts.fieldviz import provenance_footer, SENSOR_PALETTE     # noqa: E402
 
@@ -192,10 +192,6 @@ def main() -> int:
         ax.plot(r_axis_canon[show], canon_u[show], lw=1.8,
                  color=SENSOR_PALETTE[6],
                  label="loader canonical (sampled along ray)")
-        # Vertical marker at rim mask boundary
-        ax.axvline(_DISK_MASK_R_END, color="red", ls=":", lw=1,
-                     alpha=0.6,
-                     label=f"loader rim mask r={_DISK_MASK_R_END:g}")
         ax.axvline(1.0, color="0.5", ls=":", lw=1, alpha=0.4,
                      label="physical wafer edge r=1")
         ax.set_ylabel(f"u_z * {scale:g}")

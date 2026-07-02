@@ -225,10 +225,7 @@ def render_topdown_gif(sim: Simulation, x_canon: np.ndarray,
         F_full = mirror_d2(F)
         X, Y = np.meshgrid(x_full, y_full, indexing="ij")
         F_full = F_full.astype(np.float64, copy=True)
-        # Match loader rim mask (0.99), not raw disk edge, to avoid
-        # rendering the zeroed shell as a waterfall drop.
-        from data.loader import _DISK_MASK_R_END
-        F_full[(X * X + Y * Y) > _DISK_MASK_R_END * _DISK_MASK_R_END] = np.nan
+        F_full[(X * X + Y * Y) > 1.0] = np.nan
         im_canon.set_data(F_full.T)
         front_text = (f"front_r={front_r[t_idx]:.2f}"
                       if np.isfinite(front_r[t_idx]) else "front_r=--")

@@ -113,13 +113,8 @@ def render_full_disk(ax, field: np.ndarray, x_canon: np.ndarray,
         F = field.copy()
         x_axis, y_axis = x_canon, y_canon
     if mask_off_disk:
-        # Default rim mask matches the loader's -- cells at r in
-        # (_DISK_MASK_R_END, 1] are zeroed at load time, so rendering
-        # them produces a sharp waterfall drop at the edge. Callers
-        # can override r_end (e.g. 1.0) for pre-mask data.
         if r_end is None:
-            from data.loader import _DISK_MASK_R_END
-            r_end = _DISK_MASK_R_END
+            r_end = 1.0
         X, Y = np.meshgrid(x_axis, y_axis, indexing="ij")
         off = (X * X + Y * Y) > r_end * r_end
         F = F.astype(np.float64, copy=True)

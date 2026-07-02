@@ -15,7 +15,6 @@ Cache is keyed by everything that changes y or a values:
   - grid (nx, ny, nt, x_end, y_end)
   - drop_first_steps
   - split (seed, train_frac, val_frac)
-  - loader rim mask (_DISK_MASK_R_END)  -- masks affect POD projections
   - sensor positions
   - K
 
@@ -36,7 +35,6 @@ def _traj_key(npz_dir, nx, ny, nt, x_end, y_end, drop_first_steps,
     """Stable short hash. `sensor_positions` is an iterable of (r, th)
     tuples in the config order (order matters -- swapping sensor 0
     and sensor 1 produces different y tensors, so a different key)."""
-    from data.loader import _DISK_MASK_R_END, _NEAREST_FILL_MAX_DIST
     try:
         npz_dir = str(Path(str(npz_dir)).expanduser().resolve())
     except (OSError, ValueError):
@@ -44,7 +42,6 @@ def _traj_key(npz_dir, nx, ny, nt, x_end, y_end, drop_first_steps,
     sens_str = ",".join(f"({r:g},{th:g})" for r, th in sensor_positions)
     raw = (f"traj|{npz_dir}|{nx}|{ny}|{nt}|{x_end}|{y_end}|"
            f"{drop_first_steps}|{seed}|{train_frac}|{val_frac}|"
-           f"rim={_DISK_MASK_R_END}|nf={_NEAREST_FILL_MAX_DIST}|"
            f"K={K}|sens=[{sens_str}]")
     return hashlib.sha256(raw.encode()).hexdigest()[:16]
 

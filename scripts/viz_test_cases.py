@@ -280,7 +280,6 @@ def _render_radial_anim(out_path, *, w_true_m, w_pred_m,
     Output: GIF (PillowWriter, no ffmpeg needed).
     """
     from scripts.viz_radial_kymograph import _sample_radial_kymograph
-    from data.loader import _DISK_MASK_R_END
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
@@ -288,12 +287,7 @@ def _render_radial_anim(out_path, *, w_true_m, w_pred_m,
 
     n_r = w_true_m.shape[0]
     nt = w_true_m.shape[-1]
-    # Sample to the loader's rim mask threshold. With the mask set to
-    # 1.0 (physical wafer edge) the sampler shows the entire disk
-    # faithfully; any residual bilinear transition is confined to the
-    # single-grid-cell shell right at the physical rim and reads as
-    # a natural fade-out.
-    r_stop = _DISK_MASK_R_END
+    r_stop = 1.0
     gts = [_sample_radial_kymograph(
         w_true_m.astype(np.float64), x_canon, y_canon, th,
         n_r=n_r, r_max=r_stop)
@@ -417,10 +411,7 @@ def _render_interactive_compare(out_path, *, w_true_m, w_pred_m,
     x_full = np.concatenate([-x_canon[:0:-1], x_canon])
     y_full = np.concatenate([-y_canon[:0:-1], y_canon])
     X, Y = np.meshgrid(x_full, y_full, indexing="ij")
-    # Match loader rim mask (0.99) so the interactive_compare view
-    # does not show a waterfall drop at r=1 where the loader zeroed.
-    from data.loader import _DISK_MASK_R_END
-    in_disk = (X * X + Y * Y) <= _DISK_MASK_R_END * _DISK_MASK_R_END
+    in_disk = (X * X + Y * Y) <= 1.0
 
     def _mask_scale(w_3d):
         out = []
@@ -639,12 +630,10 @@ def _render_kymo_compare(out_path, *, w_true_m, w_pred_m, x_canon,
     for micrometres) is applied inside for display + colorbar labels.
     """
     from scripts.viz_radial_kymograph import _sample_radial_kymograph
-    from data.loader import _DISK_MASK_R_END
     import matplotlib.pyplot as plt
 
     n_r = w_true_m.shape[0]
-    # Sample to loader rim (default 1.0 = physical wafer edge).
-    r_stop = _DISK_MASK_R_END
+    r_stop = 1.0
     kymos_gt = [_sample_radial_kymograph(
         w_true_m.astype(np.float64), x_canon, y_canon, th,
         n_r=n_r, r_max=r_stop)

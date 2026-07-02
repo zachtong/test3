@@ -59,27 +59,6 @@ from core.simulation import Simulation
 from core.grid import canonical_grid, disk_mask
 
 _CACHE_PREFIX = "_loader_cache_"
-# Inner disk mask r_end. Physical wafer radius is 1.0 in canonical
-# coords. Cells at r > _DISK_MASK_R_END are treated as off-disk
-# (zeroed post-canonicalization). Set to 1.0 to match the physical
-# wafer edge -- earlier iterations tried 0.99 to hide a suspected
-# rim artifact, but that introduced a false zero shell that
-# nearest-fill / interpolation would never produce on its own; it
-# reads as a hard cliff in every downstream plot. The RIGHT approach
-# is to trust the loader's nearest-fill to give values in the
-# native range (which by definition contain no zeros unless the
-# COMSOL sim itself has zeros at those coords) and diagnose any
-# residual kink with scripts/diagnose_rim_kink.py.
-_DISK_MASK_R_END = 1.0
-# Nearest-fill distance cutoff, in units of canonical grid dx. Off-
-# hull cells whose nearest native point is farther than this are
-# masked (left at 0) instead of filled. Set to a large number
-# (effectively disabled) here so ALL in-disk-but-off-hull cells get
-# nearest-fill -- reproducing pre-mask loader behavior. Turn this
-# down (e.g. 3.0) only if you have hard evidence that nearest-fill
-# is producing wrong values at distant natives; do NOT use it as a
-# blunt instrument to hide rim behavior.
-_NEAREST_FILL_MAX_DIST = 1.0e6
 _PARALLEL_MIN = 32
 _QUARTER_TOL = 1e-6   # native x/y allowed slightly negative due to float roundoff
 
@@ -361,20 +340,19 @@ def _interp_rows(x_new: np.ndarray, x_old: np.ndarray,
 def _precompute_bary(xy_native: np.ndarray,
                      grid_pts: np.ndarray,
                      in_disk_flat: np.ndarray | None = None,
-                     x_canon: np.ndarray | None = None,
-                     y_canon: np.ndarray | None = None,
                      ) -> tuple[np.ndarray, np.ndarray, np.ndarray,
                                 np.ndarray, np.ndarray]:
     """Delaunay-based barycentric weights + nearest-neighbour edge fill.
 
     Builds one Delaunay over `xy_native`, locates each query point in the
     grid in a simplex, and ALSO computes a nearest-native-point fallback
-    for query points that are in-disk-but-off-hull. This is the loader's
-    response to the y-axis kymograph artifact: native point clouds rarely
-    sample the wafer edge exactly along x = 0 or y = 0, so the Delaunay
-    hull leaves a thin strip of in-disk canonical cells unfilled. Without
-    this fallback the loader zeroes them and downstream POD / kymograph /
-    overlay all show false zeros along the axes near the bonding front.
+    for query points that are in-disk-but-off-hull. Native point clouds
+    rarely sample the wafer edge exactly along the canonical Cartesian
+    grid, so the Delaunay hull leaves a thin strip of in-disk canonical
+    cells unfilled. Without this fallback the loader zeroes them and
+    downstream POD / kymograph / overlay all show false zeros in that
+    strip. Every in-disk off-hull cell is filled from its single
+    nearest native, no distance cutoff.
 
     Returns:
         vertices: (Nq, 3) int   indices into the native points (bary tri)
@@ -409,45 +387,15 @@ def _precompute_bary(xy_native: np.ndarray,
     weights = np.concatenate([b_first, b_last], axis=1)          # (Nq, 3)
     vertices = tri.simplices[simplex_safe]                       # (Nq, 3)
 
-    # Nearest-neighbour fallback for in-disk-but-off-hull cells.
-    # Reject fills whose nearest native point is FAR (> few grid dx):
-    # near the rim the Delaunay hull tends to under-shoot AND native
-    # points are sparse, so the "nearest" native for an off-hull
-    # canonical cell may be several grid cells away. Filling with
-    # that value produces a non-physical kink (verified via
-    # scripts/diagnose_rim_kink.py). Cells with too-far nearest are
-    # instead left at 0 (same as physical off-disk); the effective
-    # mask becomes adaptive: dense-native regions get filled, sparse-
-    # native rim regions get masked. Threshold: _NEAREST_FILL_MAX_DIST
-    # (default 3 grid cells).
     if in_disk_flat is None:
-        candidate_target = ~inside
+        fill_target = ~inside
     else:
-        candidate_target = (~inside) & in_disk_flat
-    fill_target = np.zeros_like(candidate_target)
+        fill_target = (~inside) & in_disk_flat
     fill_src = np.zeros(grid_pts.shape[0], dtype=np.int64)
-    if candidate_target.any():
-        # Distance cutoff in normalized-grid units. dx / dy fall back
-        # to a small default if the canonical axes were not supplied.
-        if x_canon is not None and len(x_canon) > 1:
-            grid_dx = float(x_canon[-1] - x_canon[0]) / max(
-                len(x_canon) - 1, 1)
-        else:
-            grid_dx = 1.0 / 128
-        if y_canon is not None and len(y_canon) > 1:
-            grid_dy = float(y_canon[-1] - y_canon[0]) / max(
-                len(y_canon) - 1, 1)
-        else:
-            grid_dy = 1.0 / 128
-        d_max = _NEAREST_FILL_MAX_DIST * max(grid_dx, grid_dy)
+    if fill_target.any():
         kd = cKDTree(xy_native)
-        dist, nn = kd.query(grid_pts[candidate_target], k=1)
-        keep = dist <= d_max
-        # Set fill_target only where keep is True
-        cand_idx = np.where(candidate_target)[0]
-        kept_idx = cand_idx[keep]
-        fill_target[kept_idx] = True
-        fill_src[kept_idx] = nn[keep]
+        _, nn = kd.query(grid_pts[fill_target], k=1)
+        fill_src[fill_target] = nn
     return vertices, weights, inside, fill_target, fill_src
 
 
@@ -572,8 +520,7 @@ def _build_one(args):
 
         # --- disk mask computed once, used both for nearest-fill
         # decision (in_disk_flat) and for the final off-disk zeroing. ---
-        mask2d = disk_mask(nx, ny, x_canon[-1], y_canon[-1],
-                            r_end=_DISK_MASK_R_END)
+        mask2d = disk_mask(nx, ny, x_canon[-1], y_canon[-1])
         in_disk_flat = mask2d.ravel()
 
         # --- spatial: per-step Delaunay, shared across all samples in step ---
@@ -601,8 +548,7 @@ def _build_one(args):
             xy_native = np.maximum(xy_native, 0.0)
 
             vertices, weights, inside, fill_tgt, fill_src = _precompute_bary(
-                xy_native, grid_pts, in_disk_flat=in_disk_flat,
-                x_canon=x_canon, y_canon=y_canon)
+                xy_native, grid_pts, in_disk_flat=in_disk_flat)
 
             disp_all = np.asarray(
                 z[f"{prefix}_displacement_z_corrected_upper"]
@@ -986,20 +932,7 @@ def load_dataset(path, nx: int = 128, ny: int = 128, nt: int = 300,
 
     x_canon, y_canon = canonical_grid(nx, ny, x_end, y_end)
     t_canon = np.linspace(0.0, 1.0, nt)
-    # Cache key includes drop_first_steps + rim-mask r_end so
-    # incompatible outputs never collide:
-    #   drop=0, r=1.0 -> pre-existing filename (no suffix)
-    #   drop=1, r=1.0 -> ..._drop1 (pre-rim-fix cache path)
-    #   drop=1, r=0.99 -> ..._drop1_r0p99 (post-rim-fix)
-    # This makes an old-cache HIT impossible after the rim tighten.
     suffix = "" if drop_first_steps == 0 else f"_drop{drop_first_steps}"
-    if _DISK_MASK_R_END != 1.0:
-        suffix += f"_r{_DISK_MASK_R_END:.4g}".replace(".", "p")
-    # Only tag the filename when nearest-fill actually clips
-    # (threshold small enough to affect behavior). When effectively
-    # disabled (>= 100 grid cells) leave the name alone.
-    if _NEAREST_FILL_MAX_DIST < 100:
-        suffix += f"_nf{_NEAREST_FILL_MAX_DIST:.1f}".replace(".", "p")
     cache_path = folder / f"{_CACHE_PREFIX}{nx}x{ny}x{nt}{suffix}.npz"
 
     for stale in folder.glob(f"{_CACHE_PREFIX}*.tmp.npz"):

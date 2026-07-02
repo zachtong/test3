@@ -387,15 +387,11 @@ def test_loader_backward_treal_does_not_produce_rebound(tmp_path):
 
 def test_no_artificial_zeros_inside_physical_disk(tmp_path):
     """Loader must NOT synthesize zeros inside the physical wafer
-    disk. Nearest-fill or interpolation on a native cloud whose
-    values are all non-zero can never legitimately produce a 0 --
-    if we see one, some artificial mask/threshold is quietly
-    zeroing an in-disk cell (a mistake earlier iterations of the
-    code made with rim r_end=0.99 and distance-limited nearest-fill).
-
-    We assert only for cells at r < 0.95, well inside any plausible
-    rim behavior, so the test is robust to future intentional
-    tightening of _DISK_MASK_R_END if that ever comes back."""
+    disk. Nearest-fill or interpolation on a non-zero native cloud
+    can never legitimately produce a 0; a zeroed interior cell
+    would indicate an artificial mask/threshold sneaking back in.
+    Assert at r <= 0.95, well clear of any potential rim edge
+    effects."""
     p = tmp_path / "one.npz"
     make_mock_3d_npz(p, **_good_mock_kwargs())
     x, y, sims = load_dataset(tmp_path, nx=64, ny=64, nt=8,
