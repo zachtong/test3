@@ -396,3 +396,87 @@ def test_front_radius_progresses_inward_outward_correctly():
     # must be net non-decreasing.
     assert finite[-1] >= finite[0], (
         f"front did not move outward: {finite[0]:.3f} -> {finite[-1]:.3f}")
+
+
+def test_radial_sampler_no_kink_at_45_deg_near_rim():
+    """The mask-aware radial sampler must NOT drag samples toward 0
+    near r=1 at oblique angles.
+
+    Reproduces the bug (with the old raw-bilinear implementation the
+    sampled value at theta=45, r=0.999 dropped to about half the
+    physical value because one of the 4 stencil corners sat at
+    r>1 and held the loader-zeroed 0).
+
+    Setup: canonical Cartesian grid Nx=Ny=128, single timestep.
+    True field is smooth u_z(x,y) = -170 for x^2+y^2 <= 1, else 0
+    (matches the loader convention). At theta=45 all sampled values
+    inside r < 1 must equal exactly -170 with mask-aware bilinear.
+    """
+    from scripts.viz_radial_kymograph import (             # noqa: E402
+        _sample_radial_kymograph)
+    nx = ny = 128
+    x = np.linspace(0.0, 1.0, nx)
+    y = np.linspace(0.0, 1.0, ny)
+    X, Y = np.meshgrid(x, y, indexing="ij")
+    in_disk = (X * X + Y * Y) <= 1.0
+    f = np.zeros((nx, ny, 1), dtype=np.float64)
+    f[..., 0] = np.where(in_disk, -170.0, 0.0)
+    # Sample along theta=45 up to r=0.999 (the exact spot the old
+    # sampler failed at).
+    n_r = 200
+    km45 = _sample_radial_kymograph(f, x, y, 45.0, n_r=n_r,
+                                     r_max=0.999)
+    # Every sample inside the disk must be -170 exactly (constant
+    # field, no interpolation error possible if all in-disk corners
+    # are kept and renormalized).
+    rs = np.linspace(0.0, 0.999, n_r)
+    interior = rs <= 0.98
+    assert np.allclose(km45[interior, 0], -170.0, atol=1e-9), (
+        f"interior of theta=45 was contaminated: "
+        f"min={km45[interior, 0].min():.3f}, "
+        f"max={km45[interior, 0].max():.3f}")
+    # Critical: rim r in (0.98, 0.999] must also stay near -170;
+    # allow tiny drift from stencils with all-off-disk corners
+    # (all_off -> stays at 0, which is a legitimate signal for
+    # "grid cannot represent this radius"), but the bug we are
+    # locking down produced ~-85 here. Any sample below -150 is
+    # a regression.
+    rim = rs > 0.98
+    rim_vals = km45[rim, 0]
+    # Non-zero rim samples: those where at least one stencil corner
+    # was in-disk. They MUST be at -170 (the constant field value).
+    nonzero_rim = rim_vals[rim_vals != 0]
+    if nonzero_rim.size:
+        assert np.allclose(nonzero_rim, -170.0, atol=1e-9), (
+            f"rim samples drifted away from -170 (kink regression): "
+            f"min={nonzero_rim.min():.3f}, "
+            f"max={nonzero_rim.max():.3f}")
+
+
+def test_radial_sampler_theta_0_and_90_unchanged():
+    """theta=0 and theta=90 never hit the mask-boundary bug (their
+    bilinear stencils slide along an axis and do not cross the arc).
+    The mask-aware sampler must produce identical values to the raw
+    bilinear along these directions -- verify by round-tripping a
+    smooth linear field on the axes."""
+    from scripts.viz_radial_kymograph import (             # noqa: E402
+        _sample_radial_kymograph)
+    nx = ny = 128
+    x = np.linspace(0.0, 1.0, nx)
+    y = np.linspace(0.0, 1.0, ny)
+    X, Y = np.meshgrid(x, y, indexing="ij")
+    r_grid = np.sqrt(X * X + Y * Y)
+    in_disk = r_grid <= 1.0
+    # Linear-in-r field, so we can predict expected values exactly.
+    f = np.zeros((nx, ny, 1), dtype=np.float64)
+    f[..., 0] = np.where(in_disk, -170.0 * r_grid, 0.0)
+    n_r = 100
+    for theta in (0.0, 90.0):
+        km = _sample_radial_kymograph(f, x, y, theta, n_r=n_r,
+                                       r_max=0.95)
+        rs = np.linspace(0.0, 0.95, n_r)
+        expected = -170.0 * rs
+        assert np.allclose(km[:, 0], expected, atol=1e-2), (
+            f"theta={theta} deg: mask-aware bilinear diverged from "
+            f"the raw expected slope; max err="
+            f"{np.abs(km[:, 0] - expected).max():.3f}")

@@ -54,20 +54,27 @@ _FRONT_COLOR = SENSOR_PALETTE[6]
 def _sample_radial_kymograph(f: np.ndarray, x_canon: np.ndarray,
                              y_canon: np.ndarray, theta_deg: float,
                              n_r: int = 128,
-                             r_max: float = 1.0) -> np.ndarray:
-    """Bilinear-sample f along the radial ray at theta_deg.
+                             r_max: float = 1.0,
+                             r_disk: float = 1.0) -> np.ndarray:
+    """Bilinear-sample f along the radial ray at theta_deg, mask-aware.
 
     Returns (n_r, Nt) -- value of f at r in [0, r_max] (n_r samples)
-    and every canonical time step. Off-canonical-grid points (the ray
-    may not align with grid columns) are interpolated; r values
-    outside the canonical extent are clipped to the boundary value
-    via np.interp's edge clamp on each axis.
+    and every canonical time step.
 
-    r_max default is 1.0 for backward compatibility with diagnostic
-    callers (e.g. inspect_gt_quality) that need to sample the full
-    disk including the loader-zeroed rim shell. Rendering callers
-    should pass r_max = _DISK_MASK_R_END from data.loader so their
-    curves do not dip back to zero at the rim.
+    Mask-aware detail: the loader zeroes canonical cells with
+    x^2 + y^2 > r_disk^2 (physical off-disk). A raw bilinear
+    stencil at a query near the arc has 4 corners on the Cartesian
+    grid; at oblique angles (worst case theta=45 deg) one or more
+    of those corners fall at r > r_disk and hold value 0, dragging
+    the sampled value toward 0 and producing a false kink. The fix
+    here: zero the weight of any off-disk corner and renormalize
+    surviving weights so they sum to 1. When all 4 corners are
+    off-disk the sample stays 0.
+
+    theta=0 / theta=90 rays never hit this because their stencil
+    slides along an axis and does not cross the arc; only oblique
+    angles show the artifact, which is exactly what we observed
+    with the raw bilinear implementation.
     """
     nx, ny, nt = f.shape
     rs = np.linspace(0.0, r_max, n_r)
@@ -87,11 +94,31 @@ def _sample_radial_kymograph(f: np.ndarray, x_canon: np.ndarray,
     a10 = f[ix0 + 1, iy0, :]
     a01 = f[ix0, iy0 + 1, :]
     a11 = f[ix0 + 1, iy0 + 1, :]
-    w00 = (1 - dx)[:, None] * (1 - dy)[:, None]
-    w10 = dx[:, None] * (1 - dy)[:, None]
-    w01 = (1 - dx)[:, None] * dy[:, None]
-    w11 = dx[:, None] * dy[:, None]
-    return w00 * a00 + w10 * a10 + w01 * a01 + w11 * a11
+    # Raw bilinear weights (per-query, broadcast to Nt).
+    w00 = (1 - dx) * (1 - dy)
+    w10 = dx * (1 - dy)
+    w01 = (1 - dx) * dy
+    w11 = dx * dy
+    # Disk mask per stencil corner. Corners at r > r_disk hold value
+    # 0 (loader-zeroed) and must not enter the interpolation.
+    r_disk_sq = r_disk * r_disk
+    m00 = (x_canon[ix0] ** 2 + y_canon[iy0] ** 2) <= r_disk_sq
+    m10 = (x_canon[ix0 + 1] ** 2 + y_canon[iy0] ** 2) <= r_disk_sq
+    m01 = (x_canon[ix0] ** 2 + y_canon[iy0 + 1] ** 2) <= r_disk_sq
+    m11 = (x_canon[ix0 + 1] ** 2 + y_canon[iy0 + 1] ** 2) <= r_disk_sq
+    w00 = w00 * m00.astype(np.float64)
+    w10 = w10 * m10.astype(np.float64)
+    w01 = w01 * m01.astype(np.float64)
+    w11 = w11 * m11.astype(np.float64)
+    w_sum = w00 + w10 + w01 + w11                            # (n_r,)
+    all_off = w_sum <= 0
+    w_sum_safe = np.where(all_off, 1.0, w_sum)
+    result = (w00[:, None] * a00 + w10[:, None] * a10
+              + w01[:, None] * a01 + w11[:, None] * a11
+              ) / w_sum_safe[:, None]
+    if all_off.any():
+        result[all_off, :] = 0.0
+    return result
 
 
 def render_radial_kymograph(sim: Simulation, x_canon: np.ndarray,
