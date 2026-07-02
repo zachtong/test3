@@ -17,7 +17,7 @@ subprocess.run([
     "--data.npz_dir", "/data/3D_wafer_bonding/sim_dataset_big_firehorse_1_and_2/",
     "--data.workers", "64",
     "--pod.workers", "64",
-    "--tag", "firehorse1_and_2_clean",
+    "--tag", "firehorse1_and_2_r95",
 ], check=True)
 
 # --- 2. viz_all ---
@@ -26,8 +26,8 @@ subprocess.run([
 subprocess.run([
     PY, "scripts/viz_all.py",
     "--npz-dir", "/data/3D_wafer_bonding/sim_dataset_big_firehorse_1_and_2/",
-    "--out", "viz/firehorse1_and_2_clean",
-    "--tag", "firehorse1_and_2_clean",
+    "--out", "viz/firehorse1_and_2_r95",
+    "--tag", "firehorse1_and_2_r95",
     "--show-lower",
     "--exclude", "interactive",
     "--n-samples", "2",       # per-sim viz count: 3 -> 2
@@ -37,8 +37,8 @@ subprocess.run([
 # --- 3. viz_test_cases ---
 subprocess.run([
     PY, "scripts/viz_test_cases.py",
-    "--tag", "firehorse1_and_2_clean",
-    "--out", "viz/firehorse1_and_2_clean/all_picks/",
+    "--tag", "firehorse1_and_2_r95",
+    "--out", "viz/firehorse1_and_2_r95/all_picks/",
     "--pick", "worst,best,median,random",
     "--topn", "2",            # per-pick sims: 10 -> 2
     "--layout", "snapshot,kymo,radial_anim,interactive_compare",
