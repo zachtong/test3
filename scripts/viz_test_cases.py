@@ -270,12 +270,20 @@ def _render_radial_anim(out_path, *, w_true_m, w_pred_m,
                         fps=18, max_frames=60):
     """Animated 1D radial-slice comparison of GT vs predicted.
 
-    Layout: one subplot per angle in `angles` (default 0 / 45 / 90
-    deg), side by side. Each subplot: x = r in [0, 1], y = u_z
-    (per-sim locked), one solid line for GT and one dashed line for
-    the prediction. As time advances the two curves morph together
-    -- ideal for showing at a glance whether the model tracks the
-    descending upper wafer along each radial ray in real-time.
+    Layout: two rows of subplots, one column per angle in `angles`
+    (default 0, 22.5, 45, 67.5, 90 deg).
+      Row 1: x = r in [0, 1], y = u_z (per-sim locked across all
+             angles). GT (solid dark) + predicted (dashed orange).
+      Row 2: residual = pred - GT (single red line). y range is
+             locked across all 5 angle columns so amplitude
+             comparison is apples-to-apples; symmetric around 0
+             at 99th-percentile of |residual| so isolated rim
+             spikes do not compress the interesting mid-disk
+             detail.
+
+    As time advances the top-row curves morph together and the
+    bottom-row residual reveals where and when the model
+    disagrees with GT.
 
     Output: GIF (PillowWriter, no ffmpeg needed).
     """
@@ -298,6 +306,7 @@ def _render_radial_anim(out_path, *, w_true_m, w_pred_m,
         for th in angles]
     scaled_gts = [g * value_scale for g in gts]
     scaled_prs = [p * value_scale for p in prs]
+    scaled_resids = [p - g for g, p in zip(scaled_gts, scaled_prs)]
 
     # Per-sim locked y-limits so descent is monotonic on screen.
     all_signed = np.concatenate(
@@ -308,38 +317,70 @@ def _render_radial_anim(out_path, *, w_true_m, w_pred_m,
     ymin -= 0.05 * span
     ymax += 0.05 * span
 
+    # Residual range: symmetric around 0 at 99th percentile of |r|
+    # so a few rim outliers do not crush the mid-disk signal.
+    resid_all = np.concatenate([r.ravel() for r in scaled_resids])
+    finite = resid_all[np.isfinite(resid_all)]
+    if finite.size:
+        rlim = float(np.percentile(np.abs(finite), 99))
+    else:
+        rlim = 0.0
+    if rlim <= 0:
+        rlim = max(1e-6, float(np.abs(resid_all).max()) if
+                   resid_all.size else 1e-6)
+    rlim *= 1.10                                  # 10% headroom
+    rmin, rmax = -rlim, rlim
+
     if nt > max_frames:
         frame_idx = np.linspace(0, nt - 1, max_frames).astype(int)
     else:
         frame_idx = np.arange(nt)
     r_axis = np.linspace(0.0, r_stop, n_r)
 
+    n_angles = len(angles)
     fig, axes = plt.subplots(
-        1, len(angles),
-        figsize=(4.5 * len(angles), 5.2),
-        sharex=True, sharey=True, constrained_layout=True)
-    if len(angles) == 1:
-        axes = [axes]
+        2, n_angles,
+        figsize=(4.5 * n_angles, 8.0),
+        sharex="col", sharey="row",
+        gridspec_kw=dict(height_ratios=[1.6, 1.0]),
+        constrained_layout=True)
+    if n_angles == 1:
+        axes = axes.reshape(2, 1)
+    axes_top = axes[0]
+    axes_bot = axes[1]
 
     lines_gt = []
     lines_pr = []
-    for i, (ax, th) in enumerate(zip(axes, angles)):
-        lg, = ax.plot(r_axis, scaled_gts[i][:, int(frame_idx[0])],
-                       color="0.2", lw=2.2, label="GT")
-        lp, = ax.plot(r_axis, scaled_prs[i][:, int(frame_idx[0])],
-                       color=SENSOR_MARKER_COLOR, lw=2.0, ls="--",
-                       label="predicted")
+    lines_resid = []
+    for i, th in enumerate(angles):
+        ax_t = axes_top[i]
+        lg, = ax_t.plot(r_axis, scaled_gts[i][:, int(frame_idx[0])],
+                         color="0.2", lw=2.2, label="GT")
+        lp, = ax_t.plot(r_axis, scaled_prs[i][:, int(frame_idx[0])],
+                         color=SENSOR_MARKER_COLOR, lw=2.0, ls="--",
+                         label="predicted")
         lines_gt.append(lg)
         lines_pr.append(lp)
-        ax.set_ylim(ymin, ymax)
-        ax.set_xlim(0.0, 1.0)
-        ax.set_xlabel("r (normalized)")
-        ax.set_title(f"theta = {th:g} deg", fontsize=10)
-        ax.grid(alpha=0.3)
-        # Zero line as a visual reference for the rest state.
-        ax.axhline(0.0, color="0.7", lw=0.8, ls=":")
-    axes[0].set_ylabel(f"u_z * {value_scale:g}")
-    axes[0].legend(fontsize=9, loc="lower right")
+        ax_t.set_ylim(ymin, ymax)
+        ax_t.set_xlim(0.0, 1.0)
+        ax_t.set_title(f"theta = {th:g} deg", fontsize=10)
+        ax_t.grid(alpha=0.3)
+        ax_t.axhline(0.0, color="0.7", lw=0.8, ls=":")
+
+        ax_b = axes_bot[i]
+        lr, = ax_b.plot(r_axis, scaled_resids[i][:,
+                         int(frame_idx[0])],
+                         color="#c1272d", lw=1.6)
+        lines_resid.append(lr)
+        ax_b.set_ylim(rmin, rmax)
+        ax_b.set_xlim(0.0, 1.0)
+        ax_b.set_xlabel("r (normalized)")
+        ax_b.grid(alpha=0.3)
+        ax_b.axhline(0.0, color="0.5", lw=0.8, ls=":")
+    axes_top[0].set_ylabel(f"u_z * {value_scale:g}")
+    axes_top[0].legend(fontsize=9, loc="lower right")
+    axes_bot[0].set_ylabel(
+        f"pred - GT * {value_scale:g}")
 
     def _title_at(t_idx: int) -> str:
         return (f"{tag}  |  {sel_label}  |  test_idx="
@@ -350,12 +391,14 @@ def _render_radial_anim(out_path, *, w_true_m, w_pred_m,
 
     def update(i):
         t_idx = int(frame_idx[i])
-        for lg, lp, gt, pr in zip(
-                lines_gt, lines_pr, scaled_gts, scaled_prs):
+        for lg, lp, lr, gt, pr, res in zip(
+                lines_gt, lines_pr, lines_resid,
+                scaled_gts, scaled_prs, scaled_resids):
             lg.set_ydata(gt[:, t_idx])
             lp.set_ydata(pr[:, t_idx])
+            lr.set_ydata(res[:, t_idx])
         fig.suptitle(_title_at(t_idx), fontsize=11)
-        return lines_gt + lines_pr
+        return lines_gt + lines_pr + lines_resid
 
     print(f"rendering {len(frame_idx)} radial-anim frames at "
           f"{fps} fps -> {out_path}", flush=True)
