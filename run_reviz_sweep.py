@@ -67,11 +67,23 @@ def _top_k_from_summary(csv_path: Path, k: int) -> list[str] | None:
 
 def run_viz(tag: str, out_root: Path, pick: str, topn: int,
             layout: str) -> tuple[bool, float]:
+    """viz_test_cases has a legacy single-selection behaviour: with
+    multiple picks it puts each in its own subdir under --out, but
+    with a SINGLE pick it dumps files directly into --out (no
+    subdir). To keep the on-disk layout consistent regardless of
+    how many picks the user passed, append the pick name to --out
+    when the pick string has no comma."""
+    picks = [p.strip() for p in pick.split(",") if p.strip()]
+    base_out = out_root / tag / "all_picks"
+    if len(picks) == 1:
+        out_path = base_out / picks[0]
+    else:
+        out_path = base_out
     t0 = time.time()
     cmd = [
         PY, "scripts/viz_test_cases.py",
         "--tag", tag,
-        "--out", str(out_root / tag / "all_picks/"),
+        "--out", str(out_path) + "/",
         "--pick", pick,
         "--topn", str(topn),
         "--layout", layout,
