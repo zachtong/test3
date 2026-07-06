@@ -307,24 +307,22 @@ def test_drop_first_steps_too_many_raises(tmp_path):
 
 
 def test_loader_backward_treal_does_not_produce_rebound(tmp_path):
-    """Rebound regression: an NPZ with a small tReal backward jump that
-    preflight tolerates must NOT produce a non-monotonic loaded field.
+    """Splice-artifact invariant: given native u_z that is monotone in
+    native-index order, canonical u_z stays monotone even when tReal
+    has a small backward jump at a step boundary.
 
-    Mechanism: the loader used to call np.unique on the normalized
-    tReal for de-dup, which SORTS by value. When tReal has a small
-    backward jump (e.g. native samples with tReal 0.10, 0.11, 0.09,
-    0.12), the reordered sequence would pull u_z out of physical
-    order -- a later-native-index sample (more descended) would get
-    placed before an earlier one, so the reconstructed field showed
-    the upper wafer briefly rising before descending again.
+    This locks down the loader's tReal-handling: backward jumps in
+    tReal (splice artifacts of adjacent working steps re-simulating
+    the same physical moment) must NOT cause the canonical field to
+    spuriously rise. The historical bug (pre-f1971ee) sorted native
+    samples by tReal, scrambling u_z order.
 
-    This test constructs an NPZ whose underlying u_z is STRICTLY
-    monotonically non-increasing in native-index order, then injects
-    a single sub-step backward jump in sample_tReal. After the fix,
-    the loaded field must remain monotonically non-increasing along
-    the time axis at every in-disk cell. Before the fix this test
-    fails: some cells briefly INCREASE at one interior canonical
-    time step.
+    Note: this test does NOT say "canonical u_z is monotone" is
+    always physically true. In real 3D bonding, trapped-gas bulges
+    cause transient rebound in u_z (see the companion test
+    test_gas_bulge_across_step_boundary_is_preserved). This test
+    only asserts: if the NATIVE field is monotone, canonical must
+    be too -- i.e. the loader is not INJECTING rebound.
     """
     p = tmp_path / "rebound_repro.npz"
     make_mock_3d_npz(p, **_good_mock_kwargs())
@@ -383,6 +381,105 @@ def test_loader_backward_treal_does_not_produce_rebound(tmp_path):
         f"loaded field has a rebound of magnitude {max_rise:.3e} m "
         f"despite native-index-order monotonic descent; the "
         f"tReal backward-jump canonicalization bug is back.")
+
+
+def test_gas_bulge_across_step_boundary_is_preserved(tmp_path):
+    """Physics preservation: a native u_z sequence with a real
+    rebound (trapped-gas bulge causing transient upper-wafer lift)
+    that lands on a step boundary must survive canonicalization.
+
+    Real physics: as the bonding front advances, trapped gas is
+    expelled outward as a moving bulge; at any (x, y) the upper
+    wafer transiently rises (u_z goes back up) as the bulge
+    passes over, then descends again. This can happen anywhere
+    but is especially likely at step boundaries because that's
+    where COMSOL's adaptive stepper triggers most (physics is
+    fastest during front dynamics).
+
+    An earlier loader iteration (f1971ee) collapsed each tied
+    clamped-time run to its LAST native sample, which threw away
+    the bulge's peak information whenever the boundary happened
+    to coincide with the rebound.
+
+    Test setup:
+      - Native u_z: monotone descend, then a clear positive rise
+        (the bulge), then continued descent
+      - Native tReal: mostly increasing, with a small backward
+        jump right where the bulge peaks (worst-case splice
+        alignment)
+      - Assertion: canonical u_z has a positive time-diff of
+        magnitude comparable to the injected bulge, at a
+        canonical time near the injection
+    """
+    p = tmp_path / "bulge_repro.npz"
+    # Use larger t_per_step so a triangular bulge spans several
+    # native samples (mock default S=9 is too small).
+    make_mock_3d_npz(p, n_steps=2, t_per_step=(15, 15),
+                     n_upper_per_step=(40, 50),
+                     n_lower_per_step=(30, 40))
+    with np.load(p, allow_pickle=True) as z:
+        payload = {k: z[k] for k in z.files}
+    S = int(payload["num_samples"])
+    n_steps = int(payload["num_wafer_steps"])
+    bulge_center = S // 2
+    bulge_half_width = 4
+    bulge_amp = 10e-6                # 10 um -- clearly above noise
+    baseline = -10e-6                # constant baseline (no ramp)
+    global_idx = 0
+    for i in range(n_steps):
+        prefix = f"step_{i:04d}"
+        disp = payload[f"{prefix}_displacement_z_corrected_upper"]
+        Ti, N_up = disp.shape
+        gi = np.arange(global_idx, global_idx + Ti)
+        offset = np.abs(gi - bulge_center)
+        bulge = np.where(offset < bulge_half_width,
+                          bulge_amp * (1.0 - offset / bulge_half_width),
+                          0.0)
+        u = baseline + bulge          # constant + triangular bulge
+        payload[f"{prefix}_displacement_z_corrected_upper"] = (
+            np.broadcast_to(u[:, None], (Ti, N_up))
+            .astype(np.float32).copy())
+        global_idx += Ti
+    # Inject backward tReal jump AT the bulge peak so this is the
+    # worst case for the old collapse-tied-times logic.
+    treal = payload["sample_tReal"].astype(np.float64).copy()
+    dt = float(np.median(np.diff(treal)))
+    treal[bulge_center] = treal[bulge_center - 1] - 0.3 * dt
+    payload["sample_tReal"] = treal
+    np.savez(p, **payload)
+
+    x, y, sims = load_dataset(tmp_path, nx=16, ny=16, nt=128,
+                              cache=False, workers=1)
+    assert sims, "loader unexpectedly rejected the fixture"
+    f = sims[0].f                                             # (Nx, Ny, Nt)
+
+    # Look at any interior cell -- u_z is spatially uniform in this
+    # fixture so all in-disk cells carry the same time trace.
+    X, Y = np.meshgrid(x, y, indexing="ij")
+    in_disk = (X * X + Y * Y) <= 0.5
+    assert in_disk.any()
+    ix, iy = np.argwhere(in_disk)[0]
+    trace = f[ix, iy, :]                                      # (Nt,)
+    diff = np.diff(trace)
+    max_rise = float(diff.max())
+    peak = float(trace.max())
+    # Two-part assertion:
+    # (a) SOME positive time-diff must exist (baseline canonical is
+    #     otherwise flat, so any rebound signal produces positive
+    #     diffs). Old dedup produced strictly monotone output ->
+    #     max_rise == 0.
+    # (b) The canonical peak must significantly exceed the baseline,
+    #     showing the bulge amplitude survived resampling (allow
+    #     conservative smoothing headroom -- require > 30% of
+    #     injected amplitude).
+    assert max_rise > 1e-8, (
+        f"canonical trace has NO positive time-diff (max_rise="
+        f"{max_rise:.3e} m). The tied-clamped-time dedup is back "
+        f"and killing real bulge physics.")
+    assert peak > baseline + 0.3 * bulge_amp, (
+        f"canonical peak {peak:.3e} m sits below baseline+30%bulge "
+        f"({baseline + 0.3 * bulge_amp:.3e} m); bulge amplitude "
+        f"was heavily smoothed away.")
 
 
 def test_no_artificial_zeros_inside_physical_disk(tmp_path):

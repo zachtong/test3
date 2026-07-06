@@ -578,44 +578,48 @@ def _build_one(args):
         raise ValueError(f"{p.name}: sample_tReal has zero span.")
     s = (treal - treal.min()) / span                                   # (S,)
 
-    # Force temporal monotonicity + collapse step-boundary duplicates.
+    # Force strictly monotonic tReal WITHOUT dropping any native sample.
     #
-    # tReal may briefly go backward at COMSOL step boundaries (preflight
-    # accepts up to _TREAL_BACKWARD_FACTOR * median dt). A naive
-    # np.unique + return_index=True would SORT by tReal value, so a
-    # sample with (native index=k+2, tReal earlier than k+1) gets
-    # reordered before native index k+1 -- and since bonding is
-    # monotonic descent in native-order, that sample carries a MORE
-    # descended state than its neighbour at the same-looking tReal.
-    # Interpolating over the reordered sequence produces a visible
-    # "wafer rebound" in 3D viz: the upper wafer briefly rises then
-    # descends again. It is not a physical event, it is a
-    # canonicalization artifact.
+    # Native-index order == physical time order (COMSOL guarantee).
+    # Backward jumps in tReal at COMSOL step boundaries are splicing
+    # artifacts: adjacent working steps re-simulate the same physical
+    # moment, so the tail of step N and the head of step N+1 share
+    # (or partially overlap) tReal. Preflight already caps how much
+    # backward we accept.
     #
-    # Fix in two steps:
-    #   1. Cumulative-max on s -- forces tReal to be non-decreasing,
-    #      clamping any backward jump to the running max. Native-index
-    #      order is preserved; a sample recorded with earlier-than-max
-    #      tReal is treated as if it happened at the running-max time.
-    #   2. Keep the LAST native index in each run of equal clamped time.
-    #      This is the most physically-progressed sample at that instant
-    #      (bonding has advanced further between duplicates), and matches
-    #      the "final state at boundary" semantics COMSOL uses when a
-    #      step is re-simulated.
-    s_mono = np.maximum.accumulate(s)                                  # (S,)
-    # `change_next[i]` = True iff s_mono[i+1] > s_mono[i], plus a final
-    # True so the last sample is always kept. np.where picks the indices
-    # of runs' last elements.
-    change_next = np.concatenate(
-        [s_mono[1:] > s_mono[:-1], np.array([True])])
-    keep_t = np.where(change_next)[0]
-    s_u = s_mono[keep_t]
-    f_flat = f_stack.reshape(S, nx * ny)[keep_t].T                      # (Nx*Ny, S_u)
-    bf_u = bf[keep_t]
-    f_canon_flat = _interp_rows(t_canon, s_u, f_flat)                   # (Nx*Ny, Nt)
+    # An earlier fix (see commit f1971ee) clamped tReal to the running
+    # max AND kept only the LAST native sample in each run of tied
+    # clamped time. The "keep last" step assumed monotonic descent of
+    # u_z between duplicates ("bonding advances further, later is more
+    # descended"). That assumption is wrong: physically, trapped gas
+    # inside the bonding front is expelled outward as a moving bulge,
+    # which transiently LIFTS the upper wafer (u_z goes up then back
+    # down) at any given (x, y) as the bulge passes over. That rebound
+    # is a real signal -- essential for anomaly detection of gas-trap
+    # defects -- and dropping "middle" samples in a tied-time run
+    # smoothed it away.
+    #
+    # New scheme: clamp to non-decreasing (splice artifact removed),
+    # then break ties by adding an index-linked infinitesimal so
+    # `s_effective` is STRICTLY increasing (requirement of
+    # `_interp_rows`) without losing a single sample. `tie_eps` is
+    # ~1e-6 of the median native dt -- small enough to not shift any
+    # sample's effective time by more than a rounding error, large
+    # enough to survive float64 differencing in the interpolation
+    # kernel.
+    diffs = np.diff(s)
+    positive_diffs = diffs[diffs > 0]
+    median_native_dt = (float(np.median(positive_diffs))
+                          if positive_diffs.size else 1.0)
+    tie_eps = median_native_dt * 1e-6
+    s_mono = np.maximum.accumulate(s.astype(np.float64))
+    s_effective = s_mono + tie_eps * np.arange(len(s_mono))
+    f_flat = f_stack.reshape(S, nx * ny).T                              # (Nx*Ny, S)
+    f_canon_flat = _interp_rows(t_canon, s_effective, f_flat)           # (Nx*Ny, Nt)
     f = f_canon_flat.T.reshape(nt, nx, ny).transpose(1, 2, 0)           # (Nx, Ny, Nt)
     # Time-resample bonding_front onto the same canonical Nt for params.
-    bf_canon = np.interp(t_canon, s_u, bf_u.astype(np.float64)).astype(np.float32)
+    bf_canon = np.interp(t_canon, s_effective,
+                         bf.astype(np.float64)).astype(np.float32)
 
     params["t_max"] = span
     params["bonding_front"] = bf_canon
