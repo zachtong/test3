@@ -34,6 +34,7 @@ Run:
     nohup python run_sweep.py > sweep.log 2>&1 &
 """
 from __future__ import annotations
+import argparse
 import json
 import subprocess
 import sys
@@ -43,10 +44,9 @@ from pathlib import Path
 
 PY = sys.executable
 
-# Update to your local dataset if needed. Kept identical to the
-# hardcoded path in run_overnight.py so both scripts point at the
-# same firehorse batch.
-NPZ_DIR = "/data/3D_wafer_bonding/sim_dataset_big_firehorse_1_and_2/"
+# Default when --npz-dir is not supplied. Change or override via CLI
+# when running on a different dataset.
+DEFAULT_NPZ_DIR = "/data/3D_wafer_bonding/sim_dataset_big_firehorse_1_and_2/"
 
 # The six physical sensor locations. Ordered so subset codes read
 # left-to-right as (inner-then-outer, 0-then-45-then-90).
@@ -68,7 +68,7 @@ def _coords_lookup() -> dict:
     return {p[0]: (p[1], p[2]) for p in POSITIONS}
 
 
-def build_configs() -> list[dict]:
+def build_configs(tag_prefix: str) -> list[dict]:
     """Enumerate every subset in the priority order defined above."""
     coords = _coords_lookup()
     ids = [p[0] for p in POSITIONS]
@@ -81,17 +81,17 @@ def build_configs() -> list[dict]:
                 "n": n,
                 "code": code,
                 "positions": positions,
-                "tag": f"sweep_n{n}_{code}",
+                "tag": f"{tag_prefix}_n{n}_{code}",
             })
     return out
 
 
-def run_train(cfg: dict) -> bool:
+def run_train(cfg: dict, npz_dir: str) -> bool:
     positions_json = json.dumps(cfg["positions"])
     cmd = [
         PY, "scripts/train.py",
         "--config", "configs/default.yaml",
-        "--data.npz_dir", NPZ_DIR,
+        "--data.npz_dir", npz_dir,
         "--data.workers", "64",
         "--pod.workers", "64",
         "--sensors.n", str(cfg["n"]),
@@ -132,9 +132,20 @@ def run_viz(cfg: dict) -> bool:
 
 
 def main() -> int:
-    configs = build_configs()
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap.add_argument("--npz-dir", default=DEFAULT_NPZ_DIR,
+                    help=f"path to the dataset NPZ folder "
+                    f"(default: {DEFAULT_NPZ_DIR})")
+    ap.add_argument("--tag-prefix", default="sweep",
+                    help="prefix for every config's tag; final tags "
+                    "look like <prefix>_n{N}_{code}. Use a distinct "
+                    "prefix per dataset so outputs/ + viz/ do not "
+                    "collide (e.g. --tag-prefix smalltest_sweep).")
+    args = ap.parse_args()
+
+    configs = build_configs(args.tag_prefix)
     total = len(configs)
-    print(f"Sweep: {total} configs, single seed=7,"
+    print(f"Sweep: {total} configs on {args.npz_dir}, single seed=7,"
           f" viz --topn 10 per config", flush=True)
     print(f"Priority-ordered: "
           f"{[cfg['tag'] for cfg in configs[:5]]} ... "
@@ -146,7 +157,7 @@ def main() -> int:
         elapsed_hr = (time.time() - t_start) / 3600
         print(f"\n===== [{i + 1}/{total}] {cfg['tag']}  "
               f"(elapsed {elapsed_hr:.2f}h) =====", flush=True)
-        if run_train(cfg):
+        if run_train(cfg, args.npz_dir):
             train_ok += 1
             if run_viz(cfg):
                 viz_ok += 1
