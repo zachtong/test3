@@ -101,7 +101,8 @@ def layer1_gt_quality(npz_dir: Path, out_dir: Path,
 
 
 def layer2_diversity(npz_dir: Path, out_dir: Path,
-                      nx: int, ny: int, nt: int) -> tuple[bool, str]:
+                      nx: int, ny: int, nt: int,
+                      showcase_n: int) -> tuple[bool, str]:
     ok1, _, tail1 = _step(
         "Layer 2a: viz_diversity",
         [PY, "scripts/viz_diversity.py",
@@ -115,7 +116,60 @@ def layer2_diversity(npz_dir: Path, out_dir: Path,
          str(npz_dir),
          "--out", str(out_dir / "layer2_time_density.png")],
         out_dir / "layer2_time_density.txt")
-    return (ok1 and ok2), f"{tail1}\n---\n{tail2}"
+    ok3, tail3 = _layer2c_sim_showcase(
+        npz_dir, out_dir, nx, ny, nt, showcase_n)
+    return (ok1 and ok2 and ok3),\
+        f"{tail1}\n---\n{tail2}\n---\n{tail3}"
+
+
+def _layer2c_sim_showcase(npz_dir: Path, out_dir: Path,
+                            nx: int, ny: int, nt: int,
+                            n: int) -> tuple[bool, str]:
+    """Sample n sims (by sorted filename, deterministic) and render
+    top-down GIF + 5-angle radial kymograph + 3D strip for each so
+    the user can eyeball what typical sims in the dataset look like.
+    All viz here works on a SINGLE raw NPZ; no trained model needed."""
+    showcase_dir = out_dir / "layer2_showcase"
+    showcase_dir.mkdir(parents=True, exist_ok=True)
+    sims = sorted(p for p in npz_dir.iterdir()
+                    if p.suffix == ".npz" and
+                    not p.name.startswith("_loader_cache_"))
+    if not sims:
+        return False, "no .npz files found for showcase"
+    picks = sims[:n]
+    all_ok = True
+    tails: list[str] = []
+    for sim in picks:
+        stem = sim.stem
+        # top-down 2D GIF (bonding front propagation over time)
+        ok_td, _, tail_td = _step(
+            f"Layer 2c/{stem}: viz_topdown_gif",
+            [PY, "scripts/viz_topdown_gif.py",
+             "--sim", str(sim),
+             "--out", str(showcase_dir / f"{stem}_topdown.gif"),
+             "--nx", str(nx), "--ny", str(ny), "--nt", str(nt)],
+            showcase_dir / f"{stem}_topdown.txt")
+        # 5-angle radial kymograph (r-t heatmap per angle)
+        ok_ky, _, tail_ky = _step(
+            f"Layer 2c/{stem}: viz_radial_kymograph",
+            [PY, "scripts/viz_radial_kymograph.py",
+             "--sim", str(sim),
+             "--out", str(showcase_dir / f"{stem}_kymo.png"),
+             "--nx", str(nx), "--ny", str(ny), "--nt", str(nt)],
+            showcase_dir / f"{stem}_kymo.txt")
+        # 3D snapshot strip (multiple frames side by side)
+        ok_st, _, tail_st = _step(
+            f"Layer 2c/{stem}: viz_3d_strip",
+            [PY, "scripts/viz_3d_strip.py",
+             "--sim", str(sim),
+             "--out", str(showcase_dir / f"{stem}_3dstrip.png"),
+             "--nx", str(nx), "--ny", str(ny), "--nt", str(nt),
+             "--show-lower"],
+            showcase_dir / f"{stem}_3dstrip.txt")
+        sim_ok = ok_td and ok_ky and ok_st
+        all_ok = all_ok and sim_ok
+        tails.append(f"{stem}: td={ok_td} ky={ok_ky} strip={ok_st}")
+    return all_ok, "\n".join(tails)
 
 
 def layer3_loader_smoke(npz_dir: Path, out_dir: Path,
@@ -236,6 +290,12 @@ def _write_report(out_dir: Path, results: list[dict],
                   "metrics + summary.json\n"
                   "- `layer2_diversity.png` -- per-cell std across "
                   "sims (empty regions = POD blind spots)\n"
+                  "- `layer2_time_density.png` -- native time "
+                  "sampling density\n"
+                  "- `layer2_showcase/` -- per-sim visualizations "
+                  "(top-down GIF, 5-angle radial kymograph, 3D "
+                  "snapshot strip) for the first N sims; eyeball "
+                  "what a typical sim in this dataset looks like\n"
                   "- `layer4_spectrum.png` -- POD energy decay; "
                   "check cumulative energy at K=8\n"
                   "- `layer4_mode_atlas.png` -- top 8 mode shapes "
@@ -262,6 +322,11 @@ def main() -> int:
     ap.add_argument("--gt-quality-n", type=int, default=200,
                     help="sim count for Layer 1 GT quality sample "
                     "(default: 200)")
+    ap.add_argument("--showcase-n", type=int, default=3,
+                    help="sim count for Layer 2c per-sim viz "
+                    "showcase (top-down GIF + radial kymograph "
+                    "+ 3D strip). Deterministic first-N pick by "
+                    "sorted filename. Default: 3.")
     ap.add_argument("--probe-limit", type=int, default=300,
                     help="sim count for Layer 4 POD probe "
                     "(default: 300)")
@@ -293,8 +358,10 @@ def main() -> int:
             npz_dir, out_dir)),
         (1, "GT quality", lambda: layer1_gt_quality(
             npz_dir, out_dir, args.gt_quality_n)),
-        (2, "Data diversity", lambda: layer2_diversity(
-            npz_dir, out_dir, args.nx, args.ny, args.nt)),
+        (2, "Data diversity + sim showcase",
+         lambda: layer2_diversity(
+            npz_dir, out_dir, args.nx, args.ny, args.nt,
+            args.showcase_n)),
         (3, "Loader smoke", lambda: layer3_loader_smoke(
             npz_dir, out_dir, args.nx, args.ny, args.nt)),
         (4, "POD completeness", lambda: layer4_pod_probe(
