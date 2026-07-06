@@ -341,6 +341,12 @@ def main() -> int:
                     help="skip layers with index < START_LAYER "
                     "(useful when resuming after fixing an issue "
                     "-- earlier layers already succeeded)")
+    ap.add_argument("--only-showcase", action="store_true",
+                    help="run ONLY the Layer 2c per-sim showcase "
+                    "(top-down GIF + radial kymograph + 3D strip). "
+                    "Skips every other layer. Use when the rest "
+                    "of onboarding already succeeded and you just "
+                    "want the sim visualizations added.")
     args = ap.parse_args()
 
     npz_dir = Path(args.npz_dir).expanduser().resolve()
@@ -352,6 +358,20 @@ def main() -> int:
     out_dir.mkdir(parents=True, exist_ok=True)
     print(f"Onboarding {args.tag} from {npz_dir}", flush=True)
     print(f"Report dir: {out_dir}", flush=True)
+
+    if args.only_showcase:
+        print(f"[--only-showcase] Running only Layer 2c on "
+              f"{args.showcase_n} sims", flush=True)
+        t0 = time.time()
+        ok, tail = _layer2c_sim_showcase(
+            npz_dir, out_dir, args.nx, args.ny, args.nt,
+            args.showcase_n)
+        dt = time.time() - t0
+        print(f"\nshowcase done in {dt / 60:.1f} min "
+              f"-- ok={ok}\n{tail}", flush=True)
+        print(f"Artifacts in: {out_dir / 'layer2_showcase'}",
+              flush=True)
+        return 0 if ok else 1
 
     layers = [
         (0, "Basic sanity", lambda: layer0_inspect_npz(
