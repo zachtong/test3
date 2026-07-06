@@ -139,7 +139,13 @@ def render_radial_kymograph(sim: Simulation, x_canon: np.ndarray,
     of the same sim.
     """
     if angles is None:
-        angles = [0.0, 45.0, 90.0]
+        # Include 22.5 and 67.5 -- these fall BETWEEN the physical
+        # sensor angles (0, 45, 90) so the reconstruction is
+        # sampled at rays no sensor sits on. Without them the
+        # kymograph looks flatteringly good because every ray
+        # coincides with a sensor position. 5 panels stack a bit
+        # taller but the honesty is worth it.
+        angles = [0.0, 22.5, 45.0, 67.5, 90.0]
     if sensor_rs is None:
         sensor_rs = [1.0, 1.0, 1.0]
     if sensor_thetas is None:
@@ -211,9 +217,11 @@ def main() -> int:
     ap.add_argument("--sim", required=True,
                     help="path to a single raw 3D NPZ")
     ap.add_argument("--out", required=True, help="output PNG path")
-    ap.add_argument("--angles", default="0,45,90",
+    ap.add_argument("--angles", default="0,22.5,45,67.5,90",
                     help="comma-separated theta values in deg "
-                    "(default: 0,45,90 matching the lab rig)")
+                    "(default: 0,22.5,45,67.5,90 -- sensor angles "
+                    "0/45/90 plus midway rays 22.5/67.5 where NO "
+                    "sensor sits, so the sampling is honest)")
     ap.add_argument("--nx", type=int, default=128)
     ap.add_argument("--ny", type=int, default=128)
     ap.add_argument("--nt", type=int, default=300)

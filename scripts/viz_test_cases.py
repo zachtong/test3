@@ -795,9 +795,13 @@ def main() -> int:
                     "add a translucent gray lower-wafer reference "
                     "plane on the GT and Pred subplots so the "
                     "bonding gap is visually obvious")
-    ap.add_argument("--kymo-angles", default="0,45,90",
+    ap.add_argument("--kymo-angles", default="0,22.5,45,67.5,90",
                     help="comma list of theta values (deg) for the "
-                    "kymo layout (default: 0,45,90 -- lab rig)")
+                    "kymo + radial_anim layouts (default: "
+                    "0,22.5,45,67.5,90 -- sensor angles 0/45/90 "
+                    "plus midway rays 22.5/67.5 where NO sensor "
+                    "sits, so accuracy is not visually inflated "
+                    "by the ray falling on a sensor)")
     ap.add_argument("--no-cache", action="store_true",
                     help="ignore the test-cases prediction cache and "
                     "re-run predict_run_fields (93 GB load + inference). "
