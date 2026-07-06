@@ -65,15 +65,16 @@ def _top_k_from_summary(csv_path: Path, k: int) -> list[str] | None:
     return [t for _, t in rows[:k]]
 
 
-def run_viz(tag: str, out_root: Path) -> tuple[bool, float]:
+def run_viz(tag: str, out_root: Path, pick: str, topn: int,
+            layout: str) -> tuple[bool, float]:
     t0 = time.time()
     cmd = [
         PY, "scripts/viz_test_cases.py",
         "--tag", tag,
         "--out", str(out_root / tag / "all_picks/"),
-        "--pick", "worst,best,median,random",
-        "--topn", "10",
-        "--layout", "kymo,radial_anim",
+        "--pick", pick,
+        "--topn", str(topn),
+        "--layout", layout,
         "--show-lower",
     ]
     print(f"[reviz] {tag}", flush=True)
@@ -106,6 +107,27 @@ def main() -> int:
     ap.add_argument("--tags", nargs="*", default=None,
                     help="explicit tag list (overrides --top-k and "
                     "discovery)")
+    ap.add_argument("--pick", default="worst,best,median,random",
+                    help="comma list of pick strategies passed to "
+                    "viz_test_cases --pick. Default matches what "
+                    "run_sweep.py used (worst,best,median,random) "
+                    "so viz_test_cases' prediction cache HITs -- "
+                    "fast render. Changing this string forces a "
+                    "cache MISS -> ~30 min extra per config for "
+                    "predict_run_fields to rerun.")
+    ap.add_argument("--topn", type=int, default=10,
+                    help="how many sims per pick strategy. Default "
+                    "10 matches run_sweep.py; same cache-miss "
+                    "caveat as --pick.")
+    ap.add_argument("--layout", default="kymo,radial_anim",
+                    help="comma list of viz_test_cases layouts. "
+                    "Default 'kymo,radial_anim' -- the only two "
+                    "layouts that sample along angles, so the "
+                    "only ones affected by the 5-angle default. "
+                    "Add 'snapshot' or 'interactive_compare' if "
+                    "you also want to re-render those (they are "
+                    "angle-independent so this is redundant unless "
+                    "you deleted their files).")
     args = ap.parse_args()
 
     if args.tags:
@@ -132,11 +154,23 @@ def main() -> int:
         print("no configs to re-render", file=sys.stderr)
         return 1
 
-    est_min = 15
+    # Prediction cache hits only when pick + topn match run_sweep.py.
+    cache_matched = (args.pick == "worst,best,median,random"
+                      and args.topn == 10)
+    est_min = 15 if cache_matched else 45
+    if not cache_matched:
+        print(f"WARNING: --pick={args.pick} or --topn={args.topn} "
+              f"differ from run_sweep.py defaults "
+              f"(worst,best,median,random / 10). viz_test_cases "
+              f"prediction cache will MISS, forcing "
+              f"predict_run_fields to re-run per config "
+              f"(~+30 min each). Consider running with the "
+              f"defaults if you want to save that time.",
+              flush=True)
     print(f"Re-rendering {len(tags)} config(s) [{source}]. "
           f"Estimate: ~{len(tags) * est_min} min "
-          f"({len(tags) * est_min / 60:.1f} h) at {est_min} min/config.",
-          flush=True)
+          f"({len(tags) * est_min / 60:.1f} h) at "
+          f"{est_min} min/config.", flush=True)
     out_root = Path(args.out_root)
     t_start = time.time()
     ok_count = 0
@@ -149,7 +183,8 @@ def main() -> int:
         print(f"\n===== [{i}/{len(tags)}] {tag}   "
               f"elapsed {elapsed_min:.1f} min, "
               f"ETA {eta_min:.1f} min =====", flush=True)
-        ok, dt = run_viz(tag, out_root)
+        ok, dt = run_viz(tag, out_root, args.pick, args.topn,
+                          args.layout)
         dts.append(dt)
         if ok:
             ok_count += 1
