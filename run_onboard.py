@@ -85,7 +85,7 @@ def layer1_gt_quality(npz_dir: Path, out_dir: Path,
         "Layer 1: inspect_gt_quality",
         [PY, "scripts/inspect_gt_quality.py",
          "--npz-dir", str(npz_dir),
-         "--n", str(n_sample),
+         "--n-check", str(n_sample),
          "--out", str(layer_dir)],
         out_dir / "layer1_gt_quality.txt")
     if not ok:
@@ -112,21 +112,20 @@ def layer2_diversity(npz_dir: Path, out_dir: Path,
     ok2, _, tail2 = _step(
         "Layer 2b: diagnose_time_density",
         [PY, "scripts/diagnose_time_density.py",
-         "--npz-dir", str(npz_dir),
+         str(npz_dir),
          "--out", str(out_dir / "layer2_time_density.png")],
         out_dir / "layer2_time_density.txt")
     return (ok1 and ok2), f"{tail1}\n---\n{tail2}"
 
 
-def layer3_loader_smoke(npz_dir: Path, out_dir: Path
+def layer3_loader_smoke(npz_dir: Path, out_dir: Path,
+                          nx: int, ny: int, nt: int
                           ) -> tuple[bool, str]:
-    layer_dir = out_dir / "layer3_loaded"
     ok, _, tail = _step(
         "Layer 3: diagnose_loaded",
         [PY, "scripts/diagnose_loaded.py",
-         "--npz-dir", str(npz_dir),
-         "--n", "5",
-         "--out", str(layer_dir)],
+         str(npz_dir),
+         "--nx", str(nx), "--ny", str(ny), "--nt", str(nt)],
         out_dir / "layer3_loaded.txt")
     return ok, tail
 
@@ -273,6 +272,10 @@ def main() -> int:
                     help="stop after Layer 4 (POD probe); useful "
                     "when you just want data health, not model "
                     "health")
+    ap.add_argument("--start-layer", type=int, default=0,
+                    help="skip layers with index < START_LAYER "
+                    "(useful when resuming after fixing an issue "
+                    "-- earlier layers already succeeded)")
     args = ap.parse_args()
 
     npz_dir = Path(args.npz_dir).expanduser().resolve()
@@ -293,7 +296,7 @@ def main() -> int:
         (2, "Data diversity", lambda: layer2_diversity(
             npz_dir, out_dir, args.nx, args.ny, args.nt)),
         (3, "Loader smoke", lambda: layer3_loader_smoke(
-            npz_dir, out_dir)),
+            npz_dir, out_dir, args.nx, args.ny, args.nt)),
         (4, "POD completeness", lambda: layer4_pod_probe(
             npz_dir, out_dir, args.tag,
             args.nx, args.ny, args.nt,
@@ -308,6 +311,15 @@ def main() -> int:
     all_ok = True
     t_start = time.time()
     for n, name, fn in layers:
+        if n < args.start_layer:
+            results.append(dict(n=n, name=name, ok=True,
+                                 skipped=True,
+                                 duration=f"skipped (< "
+                                 f"start-layer {args.start_layer})"))
+            print(f"\nSkipping Layer {n} ({name}) "
+                  f"[--start-layer={args.start_layer}]",
+                  flush=True)
+            continue
         if not all_ok:
             results.append(dict(n=n, name=name, ok=False,
                                  skipped=True,
