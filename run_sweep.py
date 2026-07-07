@@ -110,15 +110,14 @@ def run_train(cfg: dict, npz_dir: str) -> bool:
         return False
 
 
-def run_viz(cfg: dict) -> bool:
+def run_viz(cfg: dict, pick: str, topn: int, layout: str) -> bool:
     cmd = [
         PY, "scripts/viz_test_cases.py",
         "--tag", cfg["tag"],
         "--out", f"viz/{cfg['tag']}/all_picks/",
-        "--pick", "worst,best,median,random",
-        "--topn", "10",
-        "--layout",
-        "snapshot,kymo,radial_anim,interactive_compare",
+        "--pick", pick,
+        "--topn", str(topn),
+        "--layout", layout,
         "--show-lower",
     ]
     print(f"[viz] {' '.join(cmd)}", flush=True)
@@ -141,25 +140,59 @@ def main() -> int:
                     "look like <prefix>_n{N}_{code}. Use a distinct "
                     "prefix per dataset so outputs/ + viz/ do not "
                     "collide (e.g. --tag-prefix smalltest_sweep).")
+    ap.add_argument("--viz-pick",
+                    default="worst,best,median,random",
+                    help="comma list passed to viz_test_cases "
+                    "--pick (default: worst,best,median,random)")
+    ap.add_argument("--viz-topn", type=int, default=10,
+                    help="how many sims per pick strategy the viz "
+                    "step should render (default: 10)")
+    ap.add_argument("--viz-layout",
+                    default="snapshot,kymo,radial_anim,"
+                    "interactive_compare",
+                    help="comma list passed to viz_test_cases "
+                    "--layout. Remove 'interactive_compare' to "
+                    "skip the slow plotly HTML step; remove "
+                    "'radial_anim' to skip the slow GIF step.")
+    ap.add_argument("--skip-existing", action="store_true",
+                    help="skip configs where outputs/<tag>/"
+                    "results.json already exists. Use to resume "
+                    "a sweep after killing/tweaking mid-run "
+                    "without re-training the completed configs. "
+                    "Note: viz on the already-done configs stays "
+                    "with the ORIGINAL viz args (they were run "
+                    "before the tweak); use run_reviz_sweep.py "
+                    "later if you need them re-rendered.")
     args = ap.parse_args()
 
     configs = build_configs(args.tag_prefix)
     total = len(configs)
-    print(f"Sweep: {total} configs on {args.npz_dir}, single seed=7,"
-          f" viz --topn 10 per config", flush=True)
+    print(f"Sweep: {total} configs on {args.npz_dir}, single seed=7",
+          flush=True)
+    print(f"  viz-pick={args.viz_pick} viz-topn={args.viz_topn}",
+          flush=True)
+    print(f"  viz-layout={args.viz_layout}", flush=True)
+    print(f"  skip-existing={args.skip_existing}", flush=True)
     print(f"Priority-ordered: "
           f"{[cfg['tag'] for cfg in configs[:5]]} ... "
           f"{[cfg['tag'] for cfg in configs[-3:]]}", flush=True)
 
     t_start = time.time()
-    train_ok = viz_ok = failed = 0
+    train_ok = viz_ok = failed = skipped = 0
     for i, cfg in enumerate(configs):
         elapsed_hr = (time.time() - t_start) / 3600
         print(f"\n===== [{i + 1}/{total}] {cfg['tag']}  "
               f"(elapsed {elapsed_hr:.2f}h) =====", flush=True)
+        if args.skip_existing:
+            results_json = Path(f"outputs/{cfg['tag']}/results.json")
+            if results_json.is_file():
+                print(f"  SKIP: {results_json} exists", flush=True)
+                skipped += 1
+                continue
         if run_train(cfg, args.npz_dir):
             train_ok += 1
-            if run_viz(cfg):
+            if run_viz(cfg, args.viz_pick, args.viz_topn,
+                       args.viz_layout):
                 viz_ok += 1
             else:
                 failed += 1
@@ -168,7 +201,7 @@ def main() -> int:
     elapsed_hr = (time.time() - t_start) / 3600
     print(f"\nsweep done in {elapsed_hr:.2f}h -- "
           f"train_ok={train_ok}/{total}  viz_ok={viz_ok}/{total}  "
-          f"failed={failed}", flush=True)
+          f"failed={failed}  skipped={skipped}", flush=True)
     print("Aggregate with: python scripts/summarize_sweep.py",
           flush=True)
     return 0
