@@ -170,6 +170,15 @@ def main() -> int:
                     "savings; text stays readable.")
     ap.add_argument("--viz-radial-fps", type=int, default=18,
                     help="fps for radial_anim GIF (default: 18)")
+    ap.add_argument("--skip-viz", action="store_true",
+                    help="skip the per-config viz_test_cases step "
+                    "entirely. results.json is still written by "
+                    "train.py so summarize_sweep.py + "
+                    "analyze_sweep.py work as normal -- they only "
+                    "need results.json, not the pick images. Use "
+                    "this to get the sweep summary as fast as "
+                    "possible; render viz later for the winners "
+                    "via run_reviz_sweep.py.")
     ap.add_argument("--skip-existing", action="store_true",
                     help="skip configs where outputs/<tag>/"
                     "results.json already exists. Use to resume "
@@ -207,11 +216,14 @@ def main() -> int:
                 continue
         if run_train(cfg, args.npz_dir):
             train_ok += 1
-            if run_viz(cfg, args.viz_pick, args.viz_topn,
-                       args.viz_layout,
-                       args.viz_radial_max_frames,
-                       args.viz_radial_dpi,
-                       args.viz_radial_fps):
+            if args.skip_viz:
+                print(f"  [--skip-viz] skipping viz_test_cases",
+                      flush=True)
+            elif run_viz(cfg, args.viz_pick, args.viz_topn,
+                          args.viz_layout,
+                          args.viz_radial_max_frames,
+                          args.viz_radial_dpi,
+                          args.viz_radial_fps):
                 viz_ok += 1
             else:
                 failed += 1
