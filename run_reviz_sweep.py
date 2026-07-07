@@ -65,8 +65,29 @@ def _top_k_from_summary(csv_path: Path, k: int) -> list[str] | None:
     return [t for _, t in rows[:k]]
 
 
+def _viz_already_present(tag: str, out_root: Path, pick: str
+                          ) -> bool:
+    """Best-effort check: are the expected pick subdirs present and
+    non-empty? Used by --skip-existing to avoid re-rendering configs
+    that already have viz. Not a strict correctness check -- if a
+    prior run wrote a partial output, force re-render manually by
+    deleting the tag's all_picks/ directory."""
+    picks = [p.strip() for p in pick.split(",") if p.strip()]
+    base = out_root / tag / "all_picks"
+    if not base.is_dir():
+        return False
+    for p in picks:
+        sub = (base / p) if len(picks) > 1 else base
+        if not sub.is_dir():
+            return False
+        if not any(sub.iterdir()):
+            return False
+    return True
+
+
 def run_viz(tag: str, out_root: Path, pick: str, topn: int,
-            layout: str) -> tuple[bool, float]:
+            layout: str, radial_max_frames: int, radial_dpi: int,
+            radial_fps: int) -> tuple[bool, float]:
     """viz_test_cases has a legacy single-selection behaviour: with
     multiple picks it puts each in its own subdir under --out, but
     with a SINGLE pick it dumps files directly into --out (no
@@ -88,6 +109,9 @@ def run_viz(tag: str, out_root: Path, pick: str, topn: int,
         "--topn", str(topn),
         "--layout", layout,
         "--show-lower",
+        "--radial-max-frames", str(radial_max_frames),
+        "--radial-dpi", str(radial_dpi),
+        "--radial-fps", str(radial_fps),
     ]
     print(f"[reviz] {tag}", flush=True)
     ok = True
@@ -140,6 +164,20 @@ def main() -> int:
                     "you also want to re-render those (they are "
                     "angle-independent so this is redundant unless "
                     "you deleted their files).")
+    ap.add_argument("--radial-max-frames", type=int, default=60,
+                    help="frame count for radial_anim GIF "
+                    "(default: 60). 30 halves render time.")
+    ap.add_argument("--radial-dpi", type=int, default=100,
+                    help="dpi for radial_anim GIF (default: 100). "
+                    "80 gives further speedup, still readable.")
+    ap.add_argument("--radial-fps", type=int, default=18,
+                    help="fps for radial_anim GIF (default: 18)")
+    ap.add_argument("--skip-existing", action="store_true",
+                    help="skip configs whose all_picks/ dir "
+                    "already contains files matching the requested "
+                    "picks. Best-effort check; delete a tag's "
+                    "all_picks/ manually if you want to force "
+                    "re-render.")
     args = ap.parse_args()
 
     if args.tags:
@@ -187,6 +225,7 @@ def main() -> int:
     t_start = time.time()
     ok_count = 0
     fail_count = 0
+    skip_count = 0
     dts: list[float] = []
     for i, tag in enumerate(tags, 1):
         elapsed_min = (time.time() - t_start) / 60
@@ -195,8 +234,17 @@ def main() -> int:
         print(f"\n===== [{i}/{len(tags)}] {tag}   "
               f"elapsed {elapsed_min:.1f} min, "
               f"ETA {eta_min:.1f} min =====", flush=True)
+        if args.skip_existing and _viz_already_present(
+                tag, out_root, args.pick):
+            print(f"  SKIP: viz already present under "
+                  f"{out_root / tag / 'all_picks'}", flush=True)
+            skip_count += 1
+            continue
         ok, dt = run_viz(tag, out_root, args.pick, args.topn,
-                          args.layout)
+                          args.layout,
+                          args.radial_max_frames,
+                          args.radial_dpi,
+                          args.radial_fps)
         dts.append(dt)
         if ok:
             ok_count += 1
@@ -206,7 +254,8 @@ def main() -> int:
     total_min = (time.time() - t_start) / 60
     print(f"\nreviz done in {total_min:.1f} min "
           f"({total_min / 60:.2f} h) -- "
-          f"ok={ok_count}/{len(tags)}  fail={fail_count}",
+          f"ok={ok_count}/{len(tags)}  fail={fail_count}  "
+          f"skipped={skip_count}",
           flush=True)
     return 0
 
