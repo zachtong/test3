@@ -267,7 +267,7 @@ def _render_radial_anim(out_path, *, w_true_m, w_pred_m,
                         x_canon, y_canon, angles,
                         sim_id, tag, rel_l2, test_idx, sel_label,
                         results_path, value_scale=1.0e6,
-                        fps=18, max_frames=60):
+                        fps=18, max_frames=60, dpi=100):
     """Animated 1D radial-slice comparison of GT vs predicted.
 
     Layout: two rows of subplots, one column per angle in `angles`
@@ -411,7 +411,7 @@ def _render_radial_anim(out_path, *, w_true_m, w_pred_m,
                               "sel": (sel_label.split()[0]),
                               "layout": "radial_anim"})
     Path(out_path).parent.mkdir(parents=True, exist_ok=True)
-    anim.save(str(out_path), writer=writer, dpi=100)
+    anim.save(str(out_path), writer=writer, dpi=dpi)
     plt.close(fig)
 
 
@@ -852,6 +852,17 @@ def main() -> int:
     ap.add_argument("--force", action="store_true",
                     help="rebuild AND overwrite the test-cases cache "
                     "even on a valid hit. Implies --no-cache.")
+    ap.add_argument("--radial-max-frames", type=int, default=60,
+                    help="frame count for radial_anim GIF (default: "
+                    "60). Lower this to speed up viz -- 30 frames "
+                    "is still smooth at fps=18 and roughly halves "
+                    "render time.")
+    ap.add_argument("--radial-fps", type=int, default=18,
+                    help="fps for radial_anim GIF (default: 18)")
+    ap.add_argument("--radial-dpi", type=int, default=100,
+                    help="dpi for radial_anim GIF (default: 100). "
+                    "Lower for faster render + smaller file at the "
+                    "cost of resolution.")
     args = ap.parse_args()
 
     # Locate per-sim errors via results.json.
@@ -1068,7 +1079,10 @@ def main() -> int:
                     rel_l2=rel_l2, test_idx=int(test_idx),
                     sel_label=s["label"],
                     results_path=results_path,
-                    value_scale=args.value_scale)
+                    value_scale=args.value_scale,
+                    fps=args.radial_fps,
+                    max_frames=args.radial_max_frames,
+                    dpi=args.radial_dpi)
                 print(f"  wrote {rad_out}", flush=True)
                 total_files += 1
             if want_interactive_compare:

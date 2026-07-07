@@ -110,7 +110,9 @@ def run_train(cfg: dict, npz_dir: str) -> bool:
         return False
 
 
-def run_viz(cfg: dict, pick: str, topn: int, layout: str) -> bool:
+def run_viz(cfg: dict, pick: str, topn: int, layout: str,
+            radial_max_frames: int, radial_dpi: int,
+            radial_fps: int) -> bool:
     cmd = [
         PY, "scripts/viz_test_cases.py",
         "--tag", cfg["tag"],
@@ -119,6 +121,9 @@ def run_viz(cfg: dict, pick: str, topn: int, layout: str) -> bool:
         "--topn", str(topn),
         "--layout", layout,
         "--show-lower",
+        "--radial-max-frames", str(radial_max_frames),
+        "--radial-dpi", str(radial_dpi),
+        "--radial-fps", str(radial_fps),
     ]
     print(f"[viz] {' '.join(cmd)}", flush=True)
     try:
@@ -154,6 +159,17 @@ def main() -> int:
                     "--layout. Remove 'interactive_compare' to "
                     "skip the slow plotly HTML step; remove "
                     "'radial_anim' to skip the slow GIF step.")
+    ap.add_argument("--viz-radial-max-frames", type=int, default=60,
+                    help="frame count for radial_anim GIF. Default "
+                    "60 matches original quality. 30 halves render "
+                    "time with barely-noticeable smoothness loss "
+                    "at fps=18.")
+    ap.add_argument("--viz-radial-dpi", type=int, default=100,
+                    help="dpi for radial_anim GIF (default: 100). "
+                    "Lower to ~80 for further render + file-size "
+                    "savings; text stays readable.")
+    ap.add_argument("--viz-radial-fps", type=int, default=18,
+                    help="fps for radial_anim GIF (default: 18)")
     ap.add_argument("--skip-existing", action="store_true",
                     help="skip configs where outputs/<tag>/"
                     "results.json already exists. Use to resume "
@@ -192,7 +208,10 @@ def main() -> int:
         if run_train(cfg, args.npz_dir):
             train_ok += 1
             if run_viz(cfg, args.viz_pick, args.viz_topn,
-                       args.viz_layout):
+                       args.viz_layout,
+                       args.viz_radial_max_frames,
+                       args.viz_radial_dpi,
+                       args.viz_radial_fps):
                 viz_ok += 1
             else:
                 failed += 1
