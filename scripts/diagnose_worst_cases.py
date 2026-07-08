@@ -120,6 +120,59 @@ def _analyze_one(data: dict, top_n: int) -> None:
               f"but tail-of-tail is likely physical.")
 
 
+def _tag_sort_key(tag: str):
+    """Sort tags by trailing _k<int> if present (for K sweeps), so a
+    comparison table reads low-K to high-K regardless of CLI order.
+    Falls back to the tag string."""
+    parts = tag.rsplit("_k", 1)
+    if len(parts) == 2 and parts[1].isdigit():
+        return (0, int(parts[1]))
+    return (1, tag)
+
+
+def _compare_metrics_table(datasets: list[dict], top_n: int) -> None:
+    """The decision table: absolute field_err vs floor across configs.
+
+    gap is a RATIO (field/floor) and can look better just because
+    the floor dropped. What actually matters physically is the
+    absolute field_err. This table shows both so you can tell a
+    real improvement (field_err down) from a floor-relabeling
+    artifact (field_err flat, gap up because floor fell)."""
+    print(f"\n\n===== Absolute metrics across configs "
+          f"(the real decision table) =====")
+    print(f"  worst-{top_n} = mean over the {top_n} highest-"
+          f"field_err sims of each config\n")
+    ordered = sorted(datasets, key=lambda d: _tag_sort_key(d["tag"]))
+    header = (f"  {'tag':<28}  {'med_field':>9}  {'p95_field':>9}  "
+              f"{'wN_field':>9}  {'wN_floor':>9}  {'wN_gap':>7}")
+    print(header)
+    print("  " + "-" * (len(header) - 2))
+    best_wn = min(
+        float(np.mean(np.sort(d["field"])[::-1][:top_n]))
+        for d in ordered)
+    for d in ordered:
+        field = d["field"]
+        floor = d["floor"]
+        order = np.argsort(-field)[:top_n]
+        wn_field = float(np.mean(field[order]))
+        wn_floor = float(np.mean(floor[order]))
+        wn_gap = wn_field / max(wn_floor, 1e-24)
+        marker = "  <== best worst-case" if (
+            abs(wn_field - best_wn) < 1e-12) else ""
+        print(f"  {d['tag']:<28}  {d['median']:9.4f}  "
+              f"{d['p95']:9.4f}  {wn_field:9.4f}  "
+              f"{wn_floor:9.4f}  {wn_gap:7.2f}{marker}")
+    print(f"\n  Read this way:")
+    print(f"    - wN_field DROPS as K rises  -> higher K genuinely "
+          f"improves worst-case reconstruction; keep going.")
+    print(f"    - wN_field FLAT while wN_gap RISES -> the extra "
+          f"modes are unobservable by the sensors; error is just "
+          f"relabeled floor->model. Stop at the K where wN_field "
+          f"bottoms out.")
+    print(f"    - wN_field RISES at high K -> overshoot; the model "
+          f"is actively hurt by modes it cannot predict.")
+
+
 def _compare_hard_sims(datasets: list[dict], top_n: int) -> None:
     print(f"\n\n===== Cross-config: are the SAME sims hard? =====")
     per_tag_hard = {}
@@ -193,6 +246,7 @@ def main() -> int:
         _analyze_one(d, args.top_n)
 
     if len(datasets) >= 2:
+        _compare_metrics_table(datasets, args.top_n)
         _compare_hard_sims(datasets, args.top_n)
 
     return 0
