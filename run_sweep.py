@@ -68,12 +68,22 @@ def _coords_lookup() -> dict:
     return {p[0]: (p[1], p[2]) for p in POSITIONS}
 
 
-def build_configs(tag_prefix: str) -> list[dict]:
-    """Enumerate every subset in the priority order defined above."""
+def build_configs(tag_prefix: str, n_values: list[int]) -> list[dict]:
+    """Enumerate every subset for the requested sensor counts.
+
+    Ordering follows PRIORITY_N (most-informative sizes first) so a
+    long run that gets interrupted has covered the highest-value
+    configs. Any requested n not in PRIORITY_N is appended at the
+    end in ascending order."""
     coords = _coords_lookup()
     ids = [p[0] for p in POSITIONS]
+    wanted = set(n_values)
+    ordered_n = [n for n in PRIORITY_N if n in wanted]
+    for n in sorted(wanted):
+        if n not in ordered_n:
+            ordered_n.append(n)
     out = []
-    for n in PRIORITY_N:
+    for n in ordered_n:
         for combo in combinations(ids, n):
             code = "".join(combo)
             positions = [list(coords[c]) for c in combo]
@@ -86,7 +96,7 @@ def build_configs(tag_prefix: str) -> list[dict]:
     return out
 
 
-def run_train(cfg: dict, npz_dir: str) -> bool:
+def run_train(cfg: dict, npz_dir: str, pod_k: int) -> bool:
     positions_json = json.dumps(cfg["positions"])
     cmd = [
         PY, "scripts/train.py",
@@ -94,6 +104,7 @@ def run_train(cfg: dict, npz_dir: str) -> bool:
         "--data.npz_dir", npz_dir,
         "--data.workers", "64",
         "--pod.workers", "64",
+        "--pod.k", str(pod_k),
         "--sensors.n", str(cfg["n"]),
         "--sensors.strategy", "custom",
         "--sensors.positions", positions_json,
@@ -143,8 +154,19 @@ def main() -> int:
     ap.add_argument("--tag-prefix", default="sweep",
                     help="prefix for every config's tag; final tags "
                     "look like <prefix>_n{N}_{code}. Use a distinct "
-                    "prefix per dataset so outputs/ + viz/ do not "
-                    "collide (e.g. --tag-prefix smalltest_sweep).")
+                    "prefix per dataset AND per K so outputs/ + viz/ "
+                    "do not collide (e.g. --tag-prefix "
+                    "smalltest_sweep_k12).")
+    ap.add_argument("--pod-k", type=int, default=8,
+                    help="POD mode count K passed to train.py "
+                    "--pod.k (default: 8). Use 12 for the K=12 "
+                    "re-sweep motivated by the K-sweep result.")
+    ap.add_argument("--n-values", default="6,3,5,4,2",
+                    help="comma list of sensor counts to sweep. "
+                    "Default 6,3,5,4,2 (all). Use 3,4,5,6 to skip "
+                    "the n=2 lower-bound configs. Order does not "
+                    "matter -- the run always follows the "
+                    "most-informative-first priority.")
     ap.add_argument("--viz-pick",
                     default="worst,best,median,random",
                     help="comma list passed to viz_test_cases "
@@ -190,14 +212,18 @@ def main() -> int:
                     "later if you need them re-rendered.")
     args = ap.parse_args()
 
-    configs = build_configs(args.tag_prefix)
+    n_values = [int(x.strip()) for x in args.n_values.split(",")
+                if x.strip()]
+    configs = build_configs(args.tag_prefix, n_values)
     total = len(configs)
-    print(f"Sweep: {total} configs on {args.npz_dir}, single seed=7",
-          flush=True)
+    print(f"Sweep: {total} configs on {args.npz_dir}, single seed=7,"
+          f" K={args.pod_k}", flush=True)
+    print(f"  n-values={sorted(n_values)}", flush=True)
     print(f"  viz-pick={args.viz_pick} viz-topn={args.viz_topn}",
           flush=True)
     print(f"  viz-layout={args.viz_layout}", flush=True)
-    print(f"  skip-existing={args.skip_existing}", flush=True)
+    print(f"  skip-viz={args.skip_viz} "
+          f"skip-existing={args.skip_existing}", flush=True)
     print(f"Priority-ordered: "
           f"{[cfg['tag'] for cfg in configs[:5]]} ... "
           f"{[cfg['tag'] for cfg in configs[-3:]]}", flush=True)
@@ -214,7 +240,7 @@ def main() -> int:
                 print(f"  SKIP: {results_json} exists", flush=True)
                 skipped += 1
                 continue
-        if run_train(cfg, args.npz_dir):
+        if run_train(cfg, args.npz_dir, args.pod_k):
             train_ok += 1
             if args.skip_viz:
                 print(f"  [--skip-viz] skipping viz_test_cases",
