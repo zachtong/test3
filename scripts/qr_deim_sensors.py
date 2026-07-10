@@ -150,10 +150,16 @@ def main() -> int:
           f"candidates in r in [{args.r_min}, {args.r_max}] "
           f"(K={K}, "
           f"{'sigma-weighted' if args.weight_sigma else 'unweighted'}):")
-    print(f"  {'#':>2}  {'r':>7}  {'theta':>7}  {'(x, y)':>16}")
+    print(f"  Ordered by importance: #1 is the single most "
+          f"informative location; each next row adds the most "
+          f"remaining\n  information given the ones above it "
+          f"(greedy QR pivots). The first N rows are also the "
+          f"best N-sensor\n  subset (nested), so you can reuse "
+          f"this list for smaller n.")
+    print(f"  {'rank':>4}  {'r':>7}  {'theta':>7}  {'(x, y)':>16}")
     for i, (r_i, th_i, x_i, y_i) in enumerate(
             zip(r, theta, xs, ys)):
-        print(f"  {i + 1:>2}  {r_i:7.4f}  {th_i:7.2f}  "
+        print(f"  {i + 1:>4}  {r_i:7.4f}  {th_i:7.2f}  "
               f"({x_i:6.3f}, {y_i:6.3f})")
 
     pos_json = json.dumps(positions)
