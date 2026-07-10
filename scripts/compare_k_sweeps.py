@@ -134,6 +134,13 @@ def main() -> int:
                     choices=["median", "p95"],
                     help="which field-error metric to rank on "
                     "(default: median)")
+    ap.add_argument("--out-plot", default=None,
+                    help="optional PNG: paired scatter (A vs B with "
+                    "y=x diagonal) + slope chart. Points below the "
+                    "diagonal = B improved.")
+    ap.add_argument("--value-scale", type=float, default=100.0,
+                    help="multiply the metric for display "
+                    "(default 100 = percent relative L2)")
     args = ap.parse_args()
 
     outputs = Path(args.outputs)
@@ -279,7 +286,87 @@ def main() -> int:
                         ("" if r["b_gap"] is None
                          else f"{r['b_gap']:.4f}")])
     print(f"\nwrote {csv_path}")
+
+    if args.out_plot:
+        _render_pair_plot(rows, la, lb, m, rho, args.value_scale,
+                          Path(args.out_plot))
+        print(f"wrote {args.out_plot}")
     return 0
+
+
+def _render_pair_plot(rows, la, lb, m, rho, scale, out_path):
+    """Left: scatter of A vs B per config with the y=x diagonal
+    (points below the line = B improved). Right: slope chart, one
+    line per config from A to B (every config's change at a glance).
+    Colored by sensor count n."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    unit = "%" if abs(scale - 100.0) < 1e-9 else f"x{scale:g}"
+    av = np.array([r["a_val"] for r in rows]) * scale
+    bv = np.array([r["b_val"] for r in rows]) * scale
+    ns = np.array([r["n"] for r in rows])
+    n_uniq = sorted(set(ns.tolist()))
+    cmap = plt.get_cmap("viridis")
+    color_of = {n: cmap(i / max(len(n_uniq) - 1, 1))
+                for i, n in enumerate(n_uniq)}
+    colors = [color_of[n] for n in ns]
+
+    fig, (ax_s, ax_sl) = plt.subplots(
+        1, 2, figsize=(12.5, 5.6), constrained_layout=True)
+
+    # --- scatter with y=x ---
+    lo = 0.0
+    hi = float(max(av.max(), bv.max())) * 1.08
+    ax_s.plot([lo, hi], [lo, hi], color="0.5", ls="--", lw=1,
+              label="y = x (no change)")
+    ax_s.scatter(av, bv, c=colors, s=60, edgecolor="black",
+                 linewidth=0.5, zorder=4)
+    ax_s.fill_between([lo, hi], [lo, hi], hi, color="#e63946",
+                     alpha=0.06)
+    ax_s.fill_between([lo, hi], lo, [lo, hi], color="#2a9d8f",
+                     alpha=0.06)
+    ax_s.text(hi * 0.97, hi * 0.5, f"{lb} better\n(below line)",
+              ha="right", va="center", fontsize=9, color="#2a9d8f")
+    ax_s.text(hi * 0.35, hi * 0.97, f"{la} better\n(above line)",
+              ha="center", va="top", fontsize=9, color="#e63946")
+    ax_s.set_xlabel(f"{la} {m} ({unit})")
+    ax_s.set_ylabel(f"{lb} {m} ({unit})")
+    ax_s.set_xlim(lo, hi)
+    ax_s.set_ylim(lo, hi)
+    ax_s.set_aspect("equal")
+    ax_s.set_title(f"Paired per-config: {la} vs {lb}  "
+                   f"(Spearman rho={rho:.3f})")
+    ax_s.grid(alpha=0.3)
+    ax_s.legend(loc="lower right", fontsize=8)
+
+    # --- slope chart ---
+    for a_i, b_i, n_i in zip(av, bv, ns):
+        ax_sl.plot([0, 1], [a_i, b_i], "-", color=color_of[n_i],
+                   alpha=0.55, lw=1.0)
+        ax_sl.scatter([0, 1], [a_i, b_i], color=color_of[n_i],
+                      s=22, zorder=4)
+    ax_sl.set_xticks([0, 1])
+    ax_sl.set_xticklabels([la, lb])
+    ax_sl.set_ylabel(f"{m} ({unit})")
+    ax_sl.set_xlim(-0.2, 1.2)
+    ax_sl.set_ylim(bottom=0)
+    ax_sl.set_title("Per-config change")
+    ax_sl.grid(axis="y", alpha=0.3)
+    # legend for n colors
+    from matplotlib.lines import Line2D
+    handles = [Line2D([0], [0], marker="o", color="w",
+                      markerfacecolor=color_of[n], markersize=8,
+                      label=f"n={n}") for n in n_uniq]
+    ax_sl.legend(handles=handles, loc="upper right", fontsize=8,
+                 title="sensors")
+
+    fig.suptitle(f"{la} vs {lb}: reconstruction error per config",
+                 fontsize=13, fontweight="bold")
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(str(out_path), dpi=150, bbox_inches="tight")
+    plt.close(fig)
 
 
 if __name__ == "__main__":

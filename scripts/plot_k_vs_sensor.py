@@ -63,23 +63,40 @@ def _load_sweep(outputs: Path, prefix: str,
     return out
 
 
-def _parse_sweeps(specs: list[str]) -> list[tuple[str, int]]:
-    """Parse 'prefix:K' specs into (prefix, K) tuples, K-sorted."""
+def _parse_sweeps(specs: list[str]) -> list[tuple[str, str, int]]:
+    """Parse 'prefix:label' specs into (prefix, label, sort_key).
+
+    label may be any string (e.g. '8', '12', 'new', 'merged'). If
+    it is a pure integer it is shown as 'K=<label>' and sorts
+    numerically; otherwise it is shown verbatim and sorts by input
+    order. Mixed numeric/string labels keep input order."""
     parsed = []
-    for s in specs:
+    all_numeric = True
+    for order, s in enumerate(specs):
         if ":" not in s:
             raise SystemExit(
-                f"bad --sweeps entry '{s}', expected prefix:K")
-        prefix, k = s.rsplit(":", 1)
-        parsed.append((prefix, int(k)))
-    return sorted(parsed, key=lambda t: t[1])
+                f"bad --sweeps entry '{s}', expected prefix:label")
+        prefix, label = s.rsplit(":", 1)
+        is_num = label.lstrip("-").isdigit()
+        all_numeric = all_numeric and is_num
+        parsed.append([prefix, label, order, is_num])
+    if all_numeric:
+        parsed.sort(key=lambda t: int(t[1]))
+    out = []
+    for prefix, label, order, is_num in parsed:
+        disp = f"K={label}" if is_num else label
+        out.append((prefix, disp, order))
+    return out
 
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--sweeps", nargs="+", required=True,
-                    help="one or more prefix:K specs, e.g. "
-                    "smalltest_sweep:8 smalltest_sweep_k12:12")
+                    help="one or more prefix:label specs. label may "
+                    "be a K value (shown 'K=8') or any string "
+                    "(shown verbatim), e.g. smalltest_sweep:8 "
+                    "smalltest_sweep_k12:12  OR  "
+                    "new_sweep_k12:new merged_sweep_k12:merged")
     ap.add_argument("--outputs", default="outputs",
                     help="dir with <tag>/results.json (default: "
                     "outputs)")
@@ -97,19 +114,19 @@ def main() -> int:
     outputs = Path(args.outputs)
     sweeps = _parse_sweeps(args.sweeps)
     data: list[dict] = []
-    for prefix, k in sweeps:
+    for prefix, label, _order in sweeps:
         codes = _load_sweep(outputs, prefix, args.metric)
         if not codes:
             print(f"WARN: no configs for prefix '{prefix}'",
                   file=sys.stderr)
-        data.append(dict(prefix=prefix, k=k, codes=codes))
+        data.append(dict(prefix=prefix, label=label, codes=codes))
     data = [d for d in data if d["codes"]]
     if len(data) < 1:
         print("no sweeps with data", file=sys.stderr)
         return 1
 
     scale = args.value_scale
-    ks = [d["k"] for d in data]
+    labels = [d["label"] for d in data]
     unit = "%" if abs(scale - 100.0) < 1e-9 else f"x{scale:g}"
 
     fig, (ax_box, ax_txt) = plt.subplots(
@@ -151,16 +168,16 @@ def main() -> int:
                 color="0.6", lw=0.4, alpha=0.35, zorder=1)
 
     ax_box.set_xticks(positions)
-    ax_box.set_xticklabels([f"K={k}" for k in ks], fontsize=12)
+    ax_box.set_xticklabels(labels, fontsize=12)
     ax_box.set_ylabel(f"median field error ({unit})", fontsize=11)
-    ax_box.set_title("Field error per sensor config, grouped by K",
-                     fontsize=12)
+    ax_box.set_title("Field error per sensor config, grouped by "
+                     "condition", fontsize=12)
     ax_box.grid(axis="y", alpha=0.3)
     ax_box.set_ylim(bottom=0)
 
-    # ---- Right: quantify within-K spread vs cross-K gap ----
+    # ---- Right: quantify within-group spread vs cross-group gap ----
     ax_txt.axis("off")
-    lines = ["Within-K spread vs cross-K gap\n"]
+    lines = ["Within-group spread vs cross-group gap\n"]
     medians_per_k = []
     for d in data:
         vals = np.array(list(d["codes"].values())) * scale
@@ -168,26 +185,25 @@ def main() -> int:
         med = float(np.median(vals))
         medians_per_k.append(med)
         lines.append(
-            f"K={d['k']}:  median={med:.3f}{unit}   "
+            f"{d['label']}:  median={med:.3f}{unit}   "
             f"config-spread={spread:.3f}{unit}   "
             f"(n={len(vals)} configs)")
     lines.append("")
-    # cross-K gaps between consecutive K
+    # cross-group gaps between consecutive conditions
     for i in range(len(data) - 1):
         gap = abs(medians_per_k[i + 1] - medians_per_k[i])
         pct = (gap / medians_per_k[i] * 100
                if medians_per_k[i] else float("nan"))
-        # within-K spread averaged over the two K
         sa = (np.array(list(data[i]["codes"].values())) * scale)
         sb = (np.array(list(data[i + 1]["codes"].values())) * scale)
         avg_spread = float(((sa.max() - sa.min())
                             + (sb.max() - sb.min())) / 2)
         ratio = gap / avg_spread if avg_spread > 0 else float("inf")
         lines.append(
-            f"K={data[i]['k']} -> K={data[i + 1]['k']}:")
-        lines.append(f"   cross-K gap = {gap:.3f}{unit} "
+            f"{data[i]['label']} vs {data[i + 1]['label']}:")
+        lines.append(f"   cross-group gap = {gap:.3f}{unit} "
                      f"({pct:+.0f}%)")
-        lines.append(f"   avg within-K spread = "
+        lines.append(f"   avg within-group spread = "
                      f"{avg_spread:.3f}{unit}")
         lines.append(f"   gap / spread = {ratio:.1f}x")
         lines.append("")
@@ -212,7 +228,7 @@ def main() -> int:
     print(f"wrote {out_path}")
     for d in data:
         vals = np.array(list(d["codes"].values())) * scale
-        print(f"  K={d['k']}: {len(vals)} configs, "
+        print(f"  {d['label']}: {len(vals)} configs, "
               f"median={np.median(vals):.4f}{unit}, "
               f"spread={vals.max() - vals.min():.4f}{unit}")
     return 0
