@@ -61,6 +61,59 @@ def qr_deim_pick(Phi_disk: np.ndarray, n: int) -> np.ndarray:
     return piv[:n]
 
 
+def qr_deim_positions(basis_path, n: int, K: int | None = None,
+                      r_min: float = 0.2, r_max: float = 0.98,
+                      weight_sigma: bool = False) -> dict:
+    """Reusable QR-DEIM placement. Returns a dict with rank-ordered
+    picks and metadata; raises ValueError on a too-narrow band.
+
+    Because QR pivots are nested, the first m of an n-pick equal the
+    standalone m-pick -- so callers wanting an n-sweep can request
+    n = n_max once and slice prefixes.
+
+    Returns keys:
+      positions   list[[r, theta]] rank-ordered (deg), rounded
+      r, theta    np arrays (rank order)
+      xs, ys      np arrays canonical coords (rank order)
+      n_candidates, K, r_min, r_max, weight_sigma
+    """
+    with np.load(basis_path) as z:
+        Phi = z["Phi"]
+        sigma = z["sigma"]
+        nx, ny = (int(d) for d in z["spatial_shape"])
+    k_avail = Phi.shape[1]
+    K = k_avail if K is None else min(K, k_avail)
+    Phi = Phi[:, :K]
+    sigma = sigma[:K]
+
+    x, y = canonical_grid(nx, ny)
+    X, Y = np.meshgrid(x, y, indexing="ij")
+    r_grid = np.sqrt(X * X + Y * Y)
+    mask2d = disk_mask(nx, ny) & (r_grid >= r_min) & (r_grid <= r_max)
+    disk_idx = np.where(mask2d.ravel())[0]
+    if disk_idx.size < n:
+        raise ValueError(
+            f"only {disk_idx.size} candidate cell(s) in "
+            f"r in [{r_min}, {r_max}]; need >= {n}. Widen the band.")
+    Phi_disk = Phi[disk_idx, :]
+    if weight_sigma:
+        Phi_disk = Phi_disk * sigma[None, :]
+
+    local = qr_deim_pick(Phi_disk, n)
+    chosen_flat = disk_idx[local]
+    ix = chosen_flat // ny
+    iy = chosen_flat % ny
+    xs = x[ix]
+    ys = y[iy]
+    r = np.sqrt(xs ** 2 + ys ** 2)
+    theta = np.degrees(np.arctan2(ys, xs))
+    positions = [[round(float(r_i), 4), round(float(th_i), 2)]
+                 for r_i, th_i in zip(r, theta)]
+    return dict(positions=positions, r=r, theta=theta, xs=xs, ys=ys,
+                n_candidates=int(disk_idx.size), K=int(K),
+                r_min=r_min, r_max=r_max, weight_sigma=weight_sigma)
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--basis", required=True,
@@ -95,56 +148,23 @@ def main() -> int:
     if not basis_path.is_file():
         print(f"basis not found: {basis_path}", file=sys.stderr)
         return 2
-    with np.load(basis_path) as z:
-        Phi = z["Phi"]                              # (Nx*Ny, k_cache)
-        sigma = z["sigma"]
-        nx, ny = (int(d) for d in z["spatial_shape"])
-    k_avail = Phi.shape[1]
-    K = args.K if args.K is not None else k_avail
-    if K > k_avail:
-        print(f"requested K={K} > basis k_cache={k_avail}; "
-              f"clamping to {k_avail}", file=sys.stderr)
-        K = k_avail
-    Phi = Phi[:, :K]
-    sigma = sigma[:K]
-
-    # Candidate locations: in-disk AND within the hardware-feasible
-    # radial band [r-min, r-max]. Off-disk rows are ~0 and the very
-    # center / very rim are not mountable sensor sites.
-    x, y = canonical_grid(nx, ny)
-    X, Y = np.meshgrid(x, y, indexing="ij")
-    r_grid = np.sqrt(X * X + Y * Y)
-    mask2d = disk_mask(nx, ny)                       # (Nx, Ny) bool
-    mask2d = (mask2d
-              & (r_grid >= args.r_min)
-              & (r_grid <= args.r_max))
-    mask_flat = mask2d.ravel()
-    disk_idx = np.where(mask_flat)[0]                # (n_cand,)
-    if disk_idx.size < args.n:
-        print(f"ERROR: only {disk_idx.size} candidate cell(s) in "
-              f"r in [{args.r_min}, {args.r_max}]; need >= {args.n}. "
-              f"Widen the band.", file=sys.stderr)
+    try:
+        res = qr_deim_positions(
+            basis_path, args.n, K=args.K,
+            r_min=args.r_min, r_max=args.r_max,
+            weight_sigma=args.weight_sigma)
+    except ValueError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
         return 1
-    Phi_disk = Phi[disk_idx, :]                      # (n_cand, K)
-    if args.weight_sigma:
-        Phi_disk = Phi_disk * sigma[None, :]
-
+    positions = res["positions"]
+    r, theta = res["r"], res["theta"]
+    xs, ys = res["xs"], res["ys"]
+    K = res["K"]
+    disk_idx = range(res["n_candidates"])            # for the count print
     if args.n > K:
         print(f"note: n={args.n} > K={K}; QR gives at most K "
               f"distinct pivots, extra picks may be arbitrary",
               file=sys.stderr)
-
-    local = qr_deim_pick(Phi_disk, args.n)           # into disk_idx
-    chosen_flat = disk_idx[local]
-    ix = chosen_flat // ny
-    iy = chosen_flat % ny
-    xs = x[ix]
-    ys = y[iy]
-    r = np.sqrt(xs ** 2 + ys ** 2)
-    theta = np.degrees(np.arctan2(ys, xs))
-
-    positions = [[round(float(r_i), 4), round(float(th_i), 2)]
-                 for r_i, th_i in zip(r, theta)]
 
     print(f"QR-DEIM picked {args.n} sensor(s) from {len(disk_idx)} "
           f"candidates in r in [{args.r_min}, {args.r_max}] "
