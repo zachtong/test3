@@ -76,6 +76,14 @@ def main() -> int:
                     "value before QR, biasing placement toward "
                     "observing high-energy modes (sensible when "
                     "n < K). Default: unweighted (textbook DEIM).")
+    ap.add_argument("--r-min", type=float, default=0.2,
+                    help="drop candidate cells with r < r-min "
+                    "(sensors cannot sit too near the center; "
+                    "default: 0.2)")
+    ap.add_argument("--r-max", type=float, default=0.98,
+                    help="drop candidate cells with r > r-max "
+                    "(sensors cannot sit at the very rim; "
+                    "default: 0.98)")
     ap.add_argument("--out", default=None,
                     help="optional PNG overlay of picks vs ABCDEF")
     ap.add_argument("--positions-json", default=None,
@@ -100,13 +108,24 @@ def main() -> int:
     Phi = Phi[:, :K]
     sigma = sigma[:K]
 
-    # In-disk candidate locations only (off-disk rows are ~0 and are
-    # not physical sensor sites).
+    # Candidate locations: in-disk AND within the hardware-feasible
+    # radial band [r-min, r-max]. Off-disk rows are ~0 and the very
+    # center / very rim are not mountable sensor sites.
     x, y = canonical_grid(nx, ny)
+    X, Y = np.meshgrid(x, y, indexing="ij")
+    r_grid = np.sqrt(X * X + Y * Y)
     mask2d = disk_mask(nx, ny)                       # (Nx, Ny) bool
+    mask2d = (mask2d
+              & (r_grid >= args.r_min)
+              & (r_grid <= args.r_max))
     mask_flat = mask2d.ravel()
-    disk_idx = np.where(mask_flat)[0]                # (n_disk,)
-    Phi_disk = Phi[disk_idx, :]                      # (n_disk, K)
+    disk_idx = np.where(mask_flat)[0]                # (n_cand,)
+    if disk_idx.size < args.n:
+        print(f"ERROR: only {disk_idx.size} candidate cell(s) in "
+              f"r in [{args.r_min}, {args.r_max}]; need >= {args.n}. "
+              f"Widen the band.", file=sys.stderr)
+        return 1
+    Phi_disk = Phi[disk_idx, :]                      # (n_cand, K)
     if args.weight_sigma:
         Phi_disk = Phi_disk * sigma[None, :]
 
@@ -128,7 +147,8 @@ def main() -> int:
                  for r_i, th_i in zip(r, theta)]
 
     print(f"QR-DEIM picked {args.n} sensor(s) from {len(disk_idx)} "
-          f"in-disk candidates (K={K}, "
+          f"candidates in r in [{args.r_min}, {args.r_max}] "
+          f"(K={K}, "
           f"{'sigma-weighted' if args.weight_sigma else 'unweighted'}):")
     print(f"  {'#':>2}  {'r':>7}  {'theta':>7}  {'(x, y)':>16}")
     for i, (r_i, th_i, x_i, y_i) in enumerate(
@@ -156,13 +176,14 @@ def main() -> int:
 
     if args.out:
         _render_overlay(r, theta, xs, ys, args.n, K,
-                        args.weight_sigma, Path(args.out))
+                        args.weight_sigma, args.r_min, args.r_max,
+                        Path(args.out))
         print(f"wrote overlay -> {args.out}")
     return 0
 
 
 def _render_overlay(r, theta, xs, ys, n, K, weighted,
-                    out_path: Path) -> None:
+                    r_min, r_max, out_path: Path) -> None:
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
@@ -178,6 +199,13 @@ def _render_overlay(r, theta, xs, ys, n, K, weighted,
         ax.plot(r_ring * np.cos(np.deg2rad(th_arc)),
                 r_ring * np.sin(np.deg2rad(th_arc)),
                 color="0.75", lw=0.8, ls="--")
+    # Feasible radial band [r_min, r_max]: shade the annulus edges.
+    for rb in (r_min, r_max):
+        ax.plot(rb * np.cos(np.deg2rad(th_arc)),
+                rb * np.sin(np.deg2rad(th_arc)),
+                color="#2a9d8f", lw=1.2, ls="-", alpha=0.7)
+    ax.fill_between([0, 1.1], 0, 0, color="#2a9d8f", alpha=0.0,
+                    label=f"feasible band r in [{r_min:g}, {r_max:g}]")
     # ABCDEF hardware catalogue (gray squares)
     for letter, rr, tt in _ABCDEF:
         hx, hy = rr * np.cos(np.deg2rad(tt)), rr * np.sin(np.deg2rad(tt))
