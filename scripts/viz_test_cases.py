@@ -832,6 +832,17 @@ def main() -> int:
                     "'does the predicted wafer descend the same way "
                     "the real one does'. Filename: <slot>_relL2*"
                     "_radial.gif\n"
+                    "  polar_anim -- 3-panel ANIMATED polar-unrolled "
+                    "heatmap (GT | pred | |err|), X=theta[0,90] "
+                    "Y=r[0,1] color=value, plays over the whole "
+                    "process (~10s). Full field, not 5 slices. "
+                    "Filename: <slot>_relL2*_polar.gif\n"
+                    "  polar_agg -- 3 static |error| maps, each "
+                    "averaging one dimension: (theta,r) over time, "
+                    "(r,t) over angle, (theta,t) over radius. Shows "
+                    "WHERE (radius/angle/time) error concentrates -- "
+                    "a sensor-placement guide. Filename: "
+                    "<slot>_relL2*_polar_agg.png\n"
                     "'both' is a legacy alias for 'snapshot,kymo'.")
     ap.add_argument("--show-lower", action="store_true",
                     help="only used by --layout interactive_compare: "
@@ -863,6 +874,10 @@ def main() -> int:
                     help="dpi for radial_anim GIF (default: 100). "
                     "Lower for faster render + smaller file at the "
                     "cost of resolution.")
+    ap.add_argument("--polar-duration", type=float, default=10.0,
+                    help="playback seconds for the polar_anim GIF "
+                    "(default: 10 -- deliberately not too fast so "
+                    "the bonding process is legible)")
     args = ap.parse_args()
 
     # Locate per-sim errors via results.json.
@@ -1005,7 +1020,8 @@ def main() -> int:
         layout_list = [l for l in layout_list if l != "both"] + [
             "snapshot", "kymo"]
     valid_layouts = {"snapshot", "kymo", "radial_anim",
-                      "interactive_compare"}
+                      "interactive_compare", "polar_anim",
+                      "polar_agg"}
     unknown_layouts = [l for l in layout_list if l not in valid_layouts]
     if unknown_layouts:
         print(f"unknown --layout(s): {unknown_layouts}; valid: "
@@ -1016,6 +1032,8 @@ def main() -> int:
     want_kymo = "kymo" in layout_list
     want_radial_anim = "radial_anim" in layout_list
     want_interactive_compare = "interactive_compare" in layout_list
+    want_polar_anim = "polar_anim" in layout_list
+    want_polar_agg = "polar_agg" in layout_list
 
     total_files = 0
     for s in selections:
@@ -1101,6 +1119,35 @@ def main() -> int:
                     value_scale=args.value_scale,
                     show_lower=args.show_lower)
                 print(f"  wrote {ic_out}", flush=True)
+                total_files += 1
+            if want_polar_anim:
+                from scripts.fieldviz_polar import (
+                    render_polar_compare_anim)
+                pa_out = this_dir / f"{base_name}_polar.gif"
+                render_polar_compare_anim(
+                    pa_out,
+                    w_true_m=out_data["w_true"][slot],
+                    w_pred_m=out_data["w_pred"][slot],
+                    x_canon=out_data["x_canon"],
+                    y_canon=out_data["y_canon"],
+                    sim_id=bname, tag=args.tag, rel_l2=rel_l2,
+                    value_scale=args.value_scale,
+                    duration_sec=args.polar_duration)
+                print(f"  wrote {pa_out}", flush=True)
+                total_files += 1
+            if want_polar_agg:
+                from scripts.fieldviz_polar import (
+                    render_polar_error_aggregates)
+                pg_out = this_dir / f"{base_name}_polar_agg.png"
+                render_polar_error_aggregates(
+                    pg_out,
+                    w_true_m=out_data["w_true"][slot],
+                    w_pred_m=out_data["w_pred"][slot],
+                    x_canon=out_data["x_canon"],
+                    y_canon=out_data["y_canon"],
+                    sim_id=bname, tag=args.tag, rel_l2=rel_l2,
+                    value_scale=args.value_scale)
+                print(f"  wrote {pg_out}", flush=True)
                 total_files += 1
 
     print(f"\nall {total_files} test-case figure(s) across "
