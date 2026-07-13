@@ -14,11 +14,10 @@ dataset the true displacement amplitudes are similar across
 samples, so absolute error is the meaningful physical quantity and
 no per-sim normalization is applied.
 
-Multi-model: pass several --tags; each becomes one ROW of three
-panels, with a shared color scale per column so models are directly
-comparable. The row whose panels are hotter (or hot in a different
-place) has the worse / differently-located systematic error --
-directly attributable to that model's sensor layout.
+Batch over models: pass several --tags; each model gets its OWN
+pair of figures (mean + std), written independently with its own
+color scale. This is a batch runner, not a side-by-side
+comparison -- every model is processed and plotted on its own.
 
 Memory: predictions are fetched in chunks (--chunk sims at a time)
 and folded into a running mean, so the full N-sim field stack is
@@ -27,7 +26,8 @@ never held at once.
     python scripts/viz_polar_error_dataset.py \\
         --tags merged_sweep_k12_n6_ABCDEF qrdeim_n6_k12 \\
         --data.npz_dir /data/merged_dataset \\
-        --n-samples 200 --out viz/polar_error_dataset.png
+        --n-samples 200 --out-dir viz/polar_error
+    # -> viz/polar_error/<tag>_mean.png and <tag>_std.png per model
 """
 from __future__ import annotations
 import argparse
@@ -130,8 +130,9 @@ def _aggregates(cube):
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--tags", nargs="+", required=True,
-                    help="one or more trained model tags; each is a "
-                    "row of 3 panels")
+                    help="one or more trained model tags. Each model "
+                    "is processed independently and gets its OWN "
+                    "pair of figures (batch, not a comparison).")
     ap.add_argument("--n-samples", type=int, default=200,
                     help="test samples to aggregate (default 200)")
     ap.add_argument("--random", action="store_true",
@@ -145,17 +146,32 @@ def main() -> int:
     ap.add_argument("--n-r", type=int, default=128)
     ap.add_argument("--value-scale", type=float, default=1.0e6)
     ap.add_argument("--output-dir", default="outputs")
-    ap.add_argument("--out", default="viz/polar_error_dataset.png")
+    ap.add_argument("--out-dir", default="viz/polar_error",
+                    help="directory for the per-model figures; "
+                    "each model writes <tag>_mean.png and "
+                    "<tag>_std.png here")
+    ap.add_argument("--skip-existing", action="store_true",
+                    help="skip a tag whose <tag>_mean.png already "
+                    "exists in --out-dir")
     args, unknown = ap.parse_known_args()
     overrides = _parse_overrides(unknown)
 
+    out_dir = Path(args.out_dir)
     rng = np.random.default_rng(args.seed)
-    results = []          # list of dict per tag
+    done = failed = skipped = 0
+    peaks = []
     for tag in args.tags:
+        mean_path = out_dir / f"{tag}_mean.png"
+        std_path = out_dir / f"{tag}_std.png"
+        if args.skip_existing and mean_path.is_file():
+            print(f"[{tag}] SKIP: {mean_path} exists", flush=True)
+            skipped += 1
+            continue
         n_test = _n_test(tag, args.output_dir)
         if n_test == 0:
             print(f"WARN: no results.json / test sims for {tag}; "
                   f"skipping", file=sys.stderr)
+            failed += 1
             continue
         n = min(args.n_samples, n_test)
         if args.random:
@@ -165,92 +181,88 @@ def main() -> int:
             idx = list(range(n))
         print(f"[{tag}] aggregating {n} of {n_test} test sims",
               flush=True)
-        mean_cube, std_cube, thetas, rs, n_used = \
-            _mean_std_error_cubes(
-                tag, idx, args.output_dir, overrides, args.n_theta,
-                args.n_r, args.value_scale, args.chunk)
+        try:
+            mean_cube, std_cube, thetas, rs, n_used = \
+                _mean_std_error_cubes(
+                    tag, idx, args.output_dir, overrides,
+                    args.n_theta, args.n_r, args.value_scale,
+                    args.chunk)
+        except (ValueError, KeyError, OSError) as e:
+            print(f"[{tag}] FAILED: {type(e).__name__}: {e}",
+                  file=sys.stderr)
+            failed += 1
+            continue
         nt = mean_cube.shape[-1]
         t_axis = np.linspace(0.0, 1.0, nt)
         rec = dict(tag=tag, n_used=n_used, thetas=thetas, rs=rs,
-                   t_axis=t_axis)
-        rec["mean"] = _aggregates(mean_cube)
-        rec["std"] = _aggregates(std_cube)
-        results.append(rec)
+                   t_axis=t_axis, mean=_aggregates(mean_cube),
+                   std=_aggregates(std_cube))
+        _render(rec, mean_path, args.value_scale, stat="mean",
+                cmap="magma")
+        _render(rec, std_path, args.value_scale, stat="std",
+                cmap="viridis")
+        print(f"  wrote {mean_path}")
+        print(f"  wrote {std_path}")
+        peaks.append(rec)
+        done += 1
 
-    if not results:
-        print("no models aggregated", file=sys.stderr)
+    if not done and not skipped:
+        print("no models produced", file=sys.stderr)
         return 1
-
-    out = Path(args.out)
-    mean_path = out.with_name(out.stem + "_mean" + out.suffix)
-    std_path = out.with_name(out.stem + "_std" + out.suffix)
-    _render(results, mean_path, args.value_scale, stat="mean",
-            cmap="magma")
-    _render(results, std_path, args.value_scale, stat="std",
-            cmap="viridis")
-    print(f"\nwrote {mean_path}")
-    print(f"wrote {std_path}")
-    _print_peaks(results)
-    return 0
+    print(f"\nbatch done: {done} rendered, {skipped} skipped, "
+          f"{failed} failed")
+    _print_peaks(peaks)
+    return 0 if failed == 0 else 1
 
 
-def _render(results, out_path, value_scale, stat="mean",
-            cmap="magma"):
+def _render(rec, out_path, value_scale, stat="mean", cmap="magma"):
+    """One model, one statistic: a 1x3 figure with its own scale."""
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    nrows = len(results)
-    # shared vmax per column across all models
-    vmax_time = max(r[stat]["m_time"].max() for r in results)
-    vmax_angle = max(r[stat]["m_angle"].max() for r in results)
-    vmax_radius = max(r[stat]["m_radius"].max() for r in results)
-
+    a = rec[stat]
+    th, rr, ta = rec["thetas"], rec["rs"], rec["t_axis"]
     word = "mean" if stat == "mean" else "std"
-    fig, axes = plt.subplots(
-        nrows, 3, figsize=(16, 4.6 * nrows), squeeze=False,
-        constrained_layout=True)
     col_titles = [f"{word} |err| over time\n(where in the disk)",
                   f"{word} |err| over angle\n(which radius, when)",
                   f"{word} |err| over radius\n(which angle, when)"]
-    for row, r in enumerate(results):
-        a = r[stat]
-        th, rr, ta = r["thetas"], r["rs"], r["t_axis"]
-        im0 = axes[row][0].imshow(
-            a["m_time"].T, origin="lower", aspect="auto",
-            extent=[th[0], th[-1], rr[0], rr[-1]], cmap=cmap,
-            vmin=0, vmax=vmax_time, interpolation="nearest")
-        axes[row][0].set_xlabel("theta (deg)")
-        axes[row][0].set_ylabel(f"{r['tag']}\n\nr (normalized)",
-                                fontsize=9)
-        fig.colorbar(im0, ax=axes[row][0], fraction=0.046, pad=0.04)
 
-        im1 = axes[row][1].imshow(
-            a["m_angle"], origin="lower", aspect="auto",
-            extent=[ta[0], ta[-1], rr[0], rr[-1]], cmap=cmap,
-            vmin=0, vmax=vmax_angle, interpolation="nearest")
-        axes[row][1].set_xlabel("t (normalized)")
-        axes[row][1].set_ylabel("r (normalized)")
-        fig.colorbar(im1, ax=axes[row][1], fraction=0.046, pad=0.04)
+    fig, axes = plt.subplots(1, 3, figsize=(16, 4.8),
+                             constrained_layout=True)
+    im0 = axes[0].imshow(
+        a["m_time"].T, origin="lower", aspect="auto",
+        extent=[th[0], th[-1], rr[0], rr[-1]], cmap=cmap,
+        vmin=0, interpolation="nearest")
+    axes[0].set_xlabel("theta (deg)")
+    axes[0].set_ylabel("r (normalized)")
+    fig.colorbar(im0, ax=axes[0], fraction=0.046, pad=0.04)
 
-        im2 = axes[row][2].imshow(
-            a["m_radius"], origin="lower", aspect="auto",
-            extent=[ta[0], ta[-1], th[0], th[-1]], cmap=cmap,
-            vmin=0, vmax=vmax_radius, interpolation="nearest")
-        axes[row][2].set_xlabel("t (normalized)")
-        axes[row][2].set_ylabel("theta (deg)")
-        fig.colorbar(im2, ax=axes[row][2], fraction=0.046, pad=0.04)
+    im1 = axes[1].imshow(
+        a["m_angle"], origin="lower", aspect="auto",
+        extent=[ta[0], ta[-1], rr[0], rr[-1]], cmap=cmap,
+        vmin=0, interpolation="nearest")
+    axes[1].set_xlabel("t (normalized)")
+    axes[1].set_ylabel("r (normalized)")
+    fig.colorbar(im1, ax=axes[1], fraction=0.046, pad=0.04)
 
-        if row == 0:
-            for c in range(3):
-                axes[row][c].set_title(col_titles[c], fontsize=10)
+    im2 = axes[2].imshow(
+        a["m_radius"], origin="lower", aspect="auto",
+        extent=[ta[0], ta[-1], th[0], th[-1]], cmap=cmap,
+        vmin=0, interpolation="nearest")
+    axes[2].set_xlabel("t (normalized)")
+    axes[2].set_ylabel("theta (deg)")
+    fig.colorbar(im2, ax=axes[2], fraction=0.046, pad=0.04)
+
+    for c in range(3):
+        axes[c].set_title(col_titles[c], fontsize=10)
 
     kind = ("across-sample MEAN" if stat == "mean"
             else "across-sample STD")
-    fig.suptitle(f"Dataset {kind} of polar |error| "
-                 f"(|u_z err| * {value_scale:g}), "
-                 f"n={results[0]['n_used']} samples, shared scale "
-                 f"per column", fontsize=13, fontweight="bold")
+    fig.suptitle(f"{rec['tag']}  |  dataset {kind} of polar "
+                 f"|error| (|u_z err| * {value_scale:g}), "
+                 f"n={rec['n_used']} samples", fontsize=13,
+                 fontweight="bold")
     out_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(str(out_path), dpi=140, bbox_inches="tight")
     plt.close(fig)
