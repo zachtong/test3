@@ -135,16 +135,47 @@ def _candidate_mask(nx, ny, r_min, r_max):
     return x, y, mask
 
 
+def _a_from_npz_dir(Phi, npz_dir, nx, ny, nt, drop_first_steps,
+                    limit):
+    """Recompute modal coefficient trajectories a = Phi^T F from a
+    SUBSAMPLE of the dataset. Robust alternative to hunting for a
+    matching traj cache: the user gives the basis and the dataset,
+    and consistency is guaranteed because a is projected onto THIS
+    Phi. Loads only `limit` sims (not the full 93 GB F)."""
+    from data.loader import load_dataset
+    _x, _y, sims = load_dataset(
+        npz_dir, nx=nx, ny=ny, nt=nt, limit=limit,
+        drop_first_steps=drop_first_steps)
+    if not sims:
+        raise ValueError(f"no sims loaded from {npz_dir}")
+    nspace = Phi.shape[0]
+    K = Phi.shape[1]
+    a = np.empty((len(sims), K, nt), dtype=np.float64)
+    for i, s in enumerate(sims):
+        f = np.asarray(s.f, dtype=np.float64).reshape(nspace, -1)
+        a[i] = Phi.T @ f                                 # (K, Nt)
+    return a
+
+
 def temporal_observability_positions(
-        basis_path, traj_path, n, K=None, r_min=0.2, r_max=0.98,
-        horizon=None, discount=1.0, ridge=1e-9, rcond=1e-6) -> dict:
-    """Full pipeline. Returns dict with rank-ordered positions +
-    metadata. Nested (first m == standalone m)."""
+        basis_path, n, traj_path=None, npz_dir=None,
+        K=None, r_min=0.2, r_max=0.98, horizon=None, discount=1.0,
+        ridge=1e-9, rcond=1e-6, nt=300, drop_first_steps=1,
+        limit=400) -> dict:
+    """Full pipeline. Modal trajectories a come from either a traj
+    cache (traj_path) or are recomputed from a dataset subsample
+    (npz_dir). Returns rank-ordered positions + metadata; nested."""
     with np.load(basis_path) as z:
         Phi = z["Phi"]
         nx, ny = (int(d) for d in z["spatial_shape"])
-    with np.load(traj_path, allow_pickle=False) as z:
-        a = z["a_train_val"].astype(np.float64)          # (n_sim, k, Nt)
+    if traj_path is not None:
+        with np.load(traj_path, allow_pickle=False) as z:
+            a = z["a_train_val"].astype(np.float64)      # (n_sim, k, Nt)
+    elif npz_dir is not None:
+        a = _a_from_npz_dir(Phi, npz_dir, nx, ny, nt,
+                            drop_first_steps, limit)
+    else:
+        raise ValueError("provide traj_path or npz_dir")
     k_avail = min(Phi.shape[1], a.shape[1])
     K = k_avail if K is None else min(K, k_avail)
     Phi = Phi[:, :K]
@@ -240,9 +271,27 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--basis", required=True,
                     help="basis_cache pod3d_*.npz (Phi)")
-    ap.add_argument("--traj", required=True,
-                    help="traj_cache traj_*.npz (a_train_val modal "
-                    "coefficient trajectories)")
+    ap.add_argument("--traj", default=None,
+                    help="traj_cache traj_*.npz (a_train_val). "
+                    "Optional -- if the basis/traj filenames are "
+                    "hard to pair (different hash keys), use "
+                    "--npz-dir instead to recompute a from the "
+                    "dataset directly.")
+    ap.add_argument("--npz-dir", default=None,
+                    help="dataset dir; recompute modal trajectories "
+                    "a = Phi^T F from a subsample (--limit sims). "
+                    "Guarantees basis/a consistency. Use the SAME "
+                    "grid as training (--nt, --drop-first-steps).")
+    ap.add_argument("--limit", type=int, default=400,
+                    help="sims to load when using --npz-dir "
+                    "(default 400; the placement is a statistical "
+                    "property, does not need all sims)")
+    ap.add_argument("--nt", type=int, default=300,
+                    help="canonical timesteps (must match training; "
+                    "default 300)")
+    ap.add_argument("--drop-first-steps", type=int, default=1,
+                    help="loader trim (must match training; "
+                    "default 1)")
     ap.add_argument("--n", type=int, default=6)
     ap.add_argument("--K", type=int, default=None,
                     help="POD modes; default = all in the basis")
@@ -266,16 +315,27 @@ def main() -> int:
                     help="optional path to write picked positions")
     args = ap.parse_args()
 
-    for p in (args.basis, args.traj):
-        if not Path(p).is_file():
-            print(f"not found: {p}", file=sys.stderr)
-            return 2
+    if not Path(args.basis).is_file():
+        print(f"not found: {args.basis}", file=sys.stderr)
+        return 2
+    if not args.traj and not args.npz_dir:
+        print("provide --traj OR --npz-dir", file=sys.stderr)
+        return 2
+    if args.traj and not Path(args.traj).is_file():
+        print(f"not found: {args.traj}", file=sys.stderr)
+        return 2
+    if args.npz_dir and not Path(args.npz_dir).is_dir():
+        print(f"not a directory: {args.npz_dir}", file=sys.stderr)
+        return 2
     try:
         res = temporal_observability_positions(
-            args.basis, args.traj, args.n, K=args.K,
+            args.basis, args.n, traj_path=args.traj,
+            npz_dir=args.npz_dir, K=args.K,
             r_min=args.r_min, r_max=args.r_max,
             horizon=args.horizon, discount=args.discount,
-            ridge=args.ridge)
+            ridge=args.ridge, nt=args.nt,
+            drop_first_steps=args.drop_first_steps,
+            limit=args.limit)
     except (ValueError, KeyError) as e:
         print(f"ERROR: {type(e).__name__}: {e}", file=sys.stderr)
         return 1
