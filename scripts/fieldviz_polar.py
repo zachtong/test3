@@ -100,25 +100,43 @@ def render_polar_compare_anim(out_path, *, w_true_m, w_pred_m,
     frames = _frame_indices(nt, max_frames)
     fps = max(1, int(round(len(frames) / max(duration_sec, 1e-3))))
 
-    # Shared signed range for GT + Pred; error uses its own [0, max].
+    # Shared range for GT + Pred: use the ACTUAL data range, not a
+    # forced symmetric one. Bonding displacement is one-signed (the
+    # wafer only descends), so a symmetric [-vmax, vmax] would waste
+    # half the colorbar and crush the mid-range detail. Take the 1st
+    # and 99th percentiles over both GT and Pred so the two panels
+    # share a scale and are directly comparable.
     finite = np.concatenate([gt_s.ravel(), pr_s.ravel()])
     finite = finite[np.isfinite(finite)]
-    vmax = float(np.percentile(np.abs(finite), 99)) if finite.size else 1.0
-    if vmax <= 0:
-        vmax = 1.0
+    if finite.size:
+        vlo = float(np.percentile(finite, 1))
+        vhi = float(np.percentile(finite, 99))
+    else:
+        vlo, vhi = -1.0, 0.0
+    if vhi <= vlo:
+        vhi = vlo + 1.0
     emax = float(np.percentile(err_s[np.isfinite(err_s)], 99)) \
         if np.isfinite(err_s).any() else 1.0
     if emax <= 0:
         emax = 1.0
 
     ext = [thetas[0], thetas[-1], rs[0], rs[-1]]
+    t_axis = np.linspace(0.0, 1.0, nt)
 
-    fig, axes = plt.subplots(1, 3, figsize=(15, 5.2),
-                             constrained_layout=True)
+    # Manual layout: 3 field panels on top, a tall time-axis strip
+    # below spanning the full width.
+    fig = plt.figure(figsize=(15, 6.4))
+    gs = fig.add_gridspec(2, 3, height_ratios=[6.0, 1.1],
+                          hspace=0.32, wspace=0.22,
+                          left=0.06, right=0.97,
+                          top=0.90, bottom=0.10)
+    axes = [fig.add_subplot(gs[0, c]) for c in range(3)]
+    ax_time = fig.add_subplot(gs[1, :])
+
     titles = ["ground truth", "prediction", "|error|"]
     cubes = [gt_s, pr_s, err_s]
     cmaps = [field_cmap, field_cmap, err_cmap]
-    vlims = [(-vmax, vmax), (-vmax, vmax), (0.0, emax)]
+    vlims = [(vlo, vhi), (vlo, vhi), (0.0, emax)]
     ims = []
     for ax, ttl, cube, cmap, (lo, hi) in zip(
             axes, titles, cubes, cmaps, vlims):
@@ -132,21 +150,48 @@ def render_polar_compare_anim(out_path, *, w_true_m, w_pred_m,
         ims.append(im)
     axes[0].set_ylabel("r (normalized)")
 
-    def _suptitle(ti):
+    # --- horizontal time axis with a moving pointer ---
+    ax_time.set_xlim(0.0, 1.0)
+    ax_time.set_ylim(0.0, 1.0)
+    ax_time.set_yticks([])
+    ax_time.set_xlabel("normalized time t", fontsize=13)
+    ax_time.tick_params(axis="x", labelsize=12)
+    # the full track
+    ax_time.axhline(0.5, color="0.75", lw=6, solid_capstyle="round",
+                    zorder=1)
+    # progress fill up to current time (updated per frame)
+    prog_line, = ax_time.plot([0.0, t_axis[0]], [0.5, 0.5],
+                              color="#e63946", lw=6,
+                              solid_capstyle="round", zorder=2)
+    # the pointer marker
+    pointer, = ax_time.plot([t_axis[0]], [0.5], marker="v",
+                            markersize=20, color="#1d3557",
+                            zorder=4)
+    time_txt = ax_time.text(t_axis[0], 0.86, f"t={t_axis[0]:.2f}",
+                            ha="center", va="center", fontsize=13,
+                            fontweight="bold", color="#1d3557",
+                            zorder=5)
+    for sp in ("top", "left", "right"):
+        ax_time.spines[sp].set_visible(False)
+
+    def _suptitle():
         parts = [p for p in (tag, sim_id) if p]
         head = "  |  ".join(parts)
         rl = f"  |  rel-L2={rel_l2:.4f}" if rel_l2 is not None else ""
-        return (f"{head}{rl}  |  polar field (u_z * {value_scale:g})"
-                f"  |  t-idx {ti}/{nt - 1}")
+        return f"{head}{rl}  |  polar field (u_z * {value_scale:g})"
 
-    fig.suptitle(_suptitle(int(frames[0])), fontsize=11)
+    fig.suptitle(_suptitle(), fontsize=12)
 
     def update(k):
         ti = int(frames[k])
+        tv = float(t_axis[ti])
         for im, cube in zip(ims, cubes):
             im.set_data(cube[:, :, ti].T)
-        fig.suptitle(_suptitle(ti), fontsize=11)
-        return ims
+        prog_line.set_data([0.0, tv], [0.5, 0.5])
+        pointer.set_data([tv], [0.5])
+        time_txt.set_position((tv, 0.86))
+        time_txt.set_text(f"t={tv:.2f}")
+        return ims + [prog_line, pointer, time_txt]
 
     print(f"rendering {len(frames)} polar-anim frames at {fps} fps "
           f"(~{len(frames) / fps:.1f}s) -> {out_path}", flush=True)
