@@ -127,6 +127,56 @@ def _aggregates(cube):
         m_radius=cube.mean(axis=1))    # (theta, t)
 
 
+def _process_one_tag(task: dict) -> dict:
+    """Aggregate + render one model. Runs in the main process (serial
+    mode) or a worker process (parallel mode). Returns a small,
+    picklable result: tag, status, and (on success) the peak record
+    needed for the summary. Heavy arrays are NOT returned."""
+    tag = task["tag"]
+    out_dir = Path(task["out_dir"])
+    mean_path = out_dir / f"{tag}_mean.png"
+    std_path = out_dir / f"{tag}_std.png"
+    if task["skip_existing"] and mean_path.is_file():
+        return dict(tag=tag, status="skipped")
+    n_test = _n_test(tag, task["output_dir"])
+    if n_test == 0:
+        return dict(tag=tag, status="failed",
+                    msg="no results.json / test sims")
+    n = min(task["n_samples"], n_test)
+    if task["random"]:
+        rng = np.random.default_rng(task["seed"])
+        idx = sorted(rng.choice(n_test, size=n,
+                                replace=False).tolist())
+    else:
+        idx = list(range(n))
+    print(f"[{tag}] aggregating {n} of {n_test} test sims",
+          flush=True)
+    try:
+        mean_cube, std_cube, thetas, rs, n_used = \
+            _mean_std_error_cubes(
+                tag, idx, task["output_dir"], task["overrides"],
+                task["n_theta"], task["n_r"], task["value_scale"],
+                task["chunk"])
+    except (ValueError, KeyError, OSError) as e:
+        return dict(tag=tag, status="failed",
+                    msg=f"{type(e).__name__}: {e}")
+    nt = mean_cube.shape[-1]
+    t_axis = np.linspace(0.0, 1.0, nt)
+    rec = dict(tag=tag, n_used=n_used, thetas=thetas, rs=rs,
+               t_axis=t_axis, mean=_aggregates(mean_cube),
+               std=_aggregates(std_cube))
+    _render(rec, mean_path, task["value_scale"], stat="mean",
+            cmap="magma")
+    _render(rec, std_path, task["value_scale"], stat="std",
+            cmap="viridis")
+    print(f"  [{tag}] wrote {mean_path.name} + {std_path.name}",
+          flush=True)
+    # keep only the small aggregate maps for the peak summary
+    return dict(tag=tag, status="done", n_used=n_used,
+                thetas=thetas, rs=rs, t_axis=t_axis,
+                mean=rec["mean"])
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--tags", nargs="+", required=True,
@@ -142,6 +192,13 @@ def main() -> int:
     ap.add_argument("--chunk", type=int, default=40,
                     help="sims per predict batch (memory control; "
                     "default 40)")
+    ap.add_argument("--workers", type=int, default=1,
+                    help="how many MODELS to process in parallel "
+                    "(default 1 = serial). Each worker independently "
+                    "loads its model's test-split fields, so peak "
+                    "RAM scales with --workers; set it to what your "
+                    "memory allows. BLAS threads are capped to "
+                    "cores/workers to avoid oversubscription.")
     ap.add_argument("--n-theta", type=int, default=91)
     ap.add_argument("--n-r", type=int, default=128)
     ap.add_argument("--value-scale", type=float, default=1.0e6)
@@ -156,63 +213,52 @@ def main() -> int:
     args, unknown = ap.parse_known_args()
     overrides = _parse_overrides(unknown)
 
-    out_dir = Path(args.out_dir)
-    rng = np.random.default_rng(args.seed)
-    done = failed = skipped = 0
-    peaks = []
-    for tag in args.tags:
-        mean_path = out_dir / f"{tag}_mean.png"
-        std_path = out_dir / f"{tag}_std.png"
-        if args.skip_existing and mean_path.is_file():
-            print(f"[{tag}] SKIP: {mean_path} exists", flush=True)
-            skipped += 1
-            continue
-        n_test = _n_test(tag, args.output_dir)
-        if n_test == 0:
-            print(f"WARN: no results.json / test sims for {tag}; "
-                  f"skipping", file=sys.stderr)
-            failed += 1
-            continue
-        n = min(args.n_samples, n_test)
-        if args.random:
-            idx = sorted(rng.choice(n_test, size=n,
-                                    replace=False).tolist())
-        else:
-            idx = list(range(n))
-        print(f"[{tag}] aggregating {n} of {n_test} test sims",
-              flush=True)
+    Path(args.out_dir).mkdir(parents=True, exist_ok=True)
+    tasks = [dict(
+        tag=tag, out_dir=args.out_dir, output_dir=args.output_dir,
+        overrides=overrides, n_samples=args.n_samples,
+        random=args.random, seed=args.seed, chunk=args.chunk,
+        n_theta=args.n_theta, n_r=args.n_r,
+        value_scale=args.value_scale,
+        skip_existing=args.skip_existing) for tag in args.tags]
+
+    workers = max(1, args.workers)
+    if workers == 1:
+        results = [_process_one_tag(t) for t in tasks]
+    else:
+        # spawn context + capped BLAS threads: children import numpy
+        # fresh and inherit the thread limit from the environment,
+        # so N model-workers do not each spin up all cores.
+        import multiprocessing as mp
+        import os
         try:
-            mean_cube, std_cube, thetas, rs, n_used = \
-                _mean_std_error_cubes(
-                    tag, idx, args.output_dir, overrides,
-                    args.n_theta, args.n_r, args.value_scale,
-                    args.chunk)
-        except (ValueError, KeyError, OSError) as e:
-            print(f"[{tag}] FAILED: {type(e).__name__}: {e}",
-                  file=sys.stderr)
-            failed += 1
-            continue
-        nt = mean_cube.shape[-1]
-        t_axis = np.linspace(0.0, 1.0, nt)
-        rec = dict(tag=tag, n_used=n_used, thetas=thetas, rs=rs,
-                   t_axis=t_axis, mean=_aggregates(mean_cube),
-                   std=_aggregates(std_cube))
-        _render(rec, mean_path, args.value_scale, stat="mean",
-                cmap="magma")
-        _render(rec, std_path, args.value_scale, stat="std",
-                cmap="viridis")
-        print(f"  wrote {mean_path}")
-        print(f"  wrote {std_path}")
-        peaks.append(rec)
-        done += 1
+            n_cpu = len(os.sched_getaffinity(0))
+        except AttributeError:
+            n_cpu = os.cpu_count() or 1
+        per = max(1, n_cpu // workers)
+        for var in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS",
+                    "MKL_NUM_THREADS", "NUMEXPR_NUM_THREADS"):
+            os.environ[var] = str(per)
+        print(f"parallel: {workers} model-workers x {per} BLAS "
+              f"threads each ({n_cpu} cpus)", flush=True)
+        ctx = mp.get_context("spawn")
+        with ctx.Pool(processes=workers) as pool:
+            results = pool.map(_process_one_tag, tasks)
+
+    done = sum(1 for r in results if r["status"] == "done")
+    skipped = sum(1 for r in results if r["status"] == "skipped")
+    failed = [r for r in results if r["status"] == "failed"]
+    for r in failed:
+        print(f"[{r['tag']}] FAILED: {r.get('msg', '')}",
+              file=sys.stderr)
 
     if not done and not skipped:
         print("no models produced", file=sys.stderr)
         return 1
     print(f"\nbatch done: {done} rendered, {skipped} skipped, "
-          f"{failed} failed")
-    _print_peaks(peaks)
-    return 0 if failed == 0 else 1
+          f"{len(failed)} failed")
+    _print_peaks([r for r in results if r["status"] == "done"])
+    return 0 if not failed else 1
 
 
 def _render(rec, out_path, value_scale, stat="mean", cmap="magma"):
