@@ -192,10 +192,11 @@ def _process_one_tag(task: dict) -> dict:
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument("--tags", nargs="+", required=True,
+    ap.add_argument("--tags", nargs="+", default=None,
                     help="one or more trained model tags. Each model "
                     "is processed independently and gets its OWN "
-                    "pair of figures (batch, not a comparison).")
+                    "pair of figures (batch, not a comparison). "
+                    "Required unless --diff-tags is used.")
     ap.add_argument("--n-samples", type=int, default=200,
                     help="test samples to aggregate (default 200)")
     ap.add_argument("--random", action="store_true",
@@ -237,19 +238,36 @@ def main() -> int:
     ap.add_argument("--skip-existing", action="store_true",
                     help="skip a tag whose <tag>_mean.png already "
                     "exists in --out-dir")
+    ap.add_argument("--diff-tags", nargs=2, metavar=("A", "B"),
+                    default=None,
+                    help="difference mode: render the error field "
+                    "B - A (blue = B has less error = where the "
+                    "change from A to B helped). A and B must share "
+                    "the same dataset + split. This -- not a single "
+                    "config's error map -- is the placement signal. "
+                    "Ignores --tags.")
     args, unknown = ap.parse_known_args()
     overrides = _parse_overrides(unknown)
 
     Path(args.out_dir).mkdir(parents=True, exist_ok=True)
-    tasks = [dict(
-        tag=tag, out_dir=args.out_dir, output_dir=args.output_dir,
+    common = dict(
+        out_dir=args.out_dir, output_dir=args.output_dir,
         overrides=overrides, n_samples=args.n_samples,
         random=args.random, seed=args.seed, chunk=args.chunk,
         n_theta=args.n_theta, n_r=args.n_r,
         r_focus_lo=args.r_focus_lo, r_focus_hi=args.r_focus_hi,
-        clip_pctl=args.clip_pctl,
-        value_scale=args.value_scale,
-        skip_existing=args.skip_existing) for tag in args.tags]
+        clip_pctl=args.clip_pctl, value_scale=args.value_scale,
+        skip_existing=args.skip_existing)
+
+    if args.diff_tags:
+        return _diff_mode(args.diff_tags[0], args.diff_tags[1],
+                          common)
+
+    if not args.tags:
+        print("provide --tags (batch) or --diff-tags A B (diff)",
+              file=sys.stderr)
+        return 2
+    tasks = [dict(tag=tag, **common) for tag in args.tags]
 
     workers = max(1, args.workers)
     if workers == 1:
@@ -357,6 +375,135 @@ def _render(rec, out_path, value_scale, stat="mean", cmap="magma"):
                  f"|error| (|u_z err| * {value_scale:g}), "
                  f"n={rec['n_used']} samples", fontsize=13,
                  fontweight="bold")
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(str(out_path), dpi=140, bbox_inches="tight")
+    plt.close(fig)
+
+
+def _mean_cube_for_tag(tag, idx, task) -> tuple:
+    """Just the across-sample MEAN |error| cube for one tag (drops
+    the std). Used by the diff mode."""
+    mean_cube, _std, thetas, rs, n_used = _mean_std_error_cubes(
+        tag, idx, task["output_dir"], task["overrides"],
+        task["n_theta"], task["n_r"], task["value_scale"],
+        task["chunk"])
+    return mean_cube, thetas, rs, n_used
+
+
+def _diff_mode(tag_a, tag_b, task) -> int:
+    """Render the difference field B - A of two configs' across-
+    sample mean |error| cubes. Negative (blue) = B has LESS error
+    than A at that location/time; that is where going from A to B
+    (adding / moving sensors) helped. This -- not a single config's
+    error -- is the sensor-placement signal: it shows what a change
+    in the sensor set actually bought, where.
+
+    A and B must share the same dataset + split so the SAME test
+    sims are compared (the test split depends on seed/fracs, not
+    sensors, so configs on the same data are directly comparable)."""
+    na = _n_test(tag_a, task["output_dir"])
+    nb = _n_test(tag_b, task["output_dir"])
+    if na == 0 or nb == 0:
+        print(f"missing results.json: {tag_a}({na}) {tag_b}({nb})",
+              file=sys.stderr)
+        return 1
+    n = min(task["n_samples"], na, nb)
+    if task["random"]:
+        rng = np.random.default_rng(task["seed"])
+        # SAME idx for both so identical sims are differenced
+        idx = sorted(rng.choice(min(na, nb), size=n,
+                                replace=False).tolist())
+    else:
+        idx = list(range(n))
+    print(f"[diff] {tag_b} minus {tag_a} on {n} shared test sims",
+          flush=True)
+    cube_a, tha, rsa, ua = _mean_cube_for_tag(tag_a, idx, task)
+    cube_b, thb, rsb, ub = _mean_cube_for_tag(tag_b, idx, task)
+    if cube_a.shape != cube_b.shape:
+        print(f"shape mismatch {cube_a.shape} vs {cube_b.shape}",
+              file=sys.stderr)
+        return 1
+    diff = cube_b - cube_a                       # (theta, r, t)
+    rs = rsa
+    r_band = (rs >= task["r_focus_lo"]) & (rs <= task["r_focus_hi"])
+    if not r_band.any():
+        r_band = np.ones_like(rs, dtype=bool)
+    nt = diff.shape[-1]
+    rec = dict(tag=f"{tag_b}  minus  {tag_a}", n_used=n,
+               thetas=tha, rs=rs, t_axis=np.linspace(0, 1, nt),
+               r_band=r_band, clip_pctl=task["clip_pctl"],
+               diff=_aggregates(diff, r_band))
+    out = Path(task["out_dir"]) / f"diff_{tag_b}_minus_{tag_a}.png"
+    _render_diff(rec, out, task["value_scale"])
+    print(f"wrote {out}")
+    # summary: biggest improvement (most negative) location
+    a = rec["diff"]
+    ti, ri = np.unravel_index(a["m_time"].argmin(), a["m_time"].shape)
+    print(f"  biggest error DROP (B<A): theta={tha[ti]:.0f}deg "
+          f"r={rs[ri]:.2f}, delta={a['m_time'][ti, ri]:+.3f}")
+    return 0
+
+
+def _render_diff(rec, out_path, value_scale, cmap="RdBu_r"):
+    """3-panel diverging difference (B - A), symmetric about 0,
+    band-focused color. Blue = B lower error (improvement)."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    a = rec["diff"]
+    th, rr, ta = rec["thetas"], rec["rs"], rec["t_axis"]
+    band = rec["r_band"]
+    p = rec.get("clip_pctl", 99.0)
+    lo, hi = float(rr[band][0]), float(rr[band][-1])
+
+    def _sym(arr):
+        arr = arr[np.isfinite(arr)]
+        v = float(np.percentile(np.abs(arr), p)) if arr.size else 1.0
+        return v if v > 0 else 1.0
+    vt = _sym(a["m_time"][:, band])
+    va = _sym(a["m_angle"][band, :])
+    vr = _sym(a["m_radius"])
+
+    col_titles = ["diff over time\n(where in the disk)",
+                  "diff over angle\n(which radius, when)",
+                  f"diff over radius\n(band r in [{lo:.2g},{hi:.2g}])"]
+    fig, axes = plt.subplots(1, 3, figsize=(16, 4.8),
+                             constrained_layout=True)
+    im0 = axes[0].imshow(
+        a["m_time"].T, origin="lower", aspect="auto",
+        extent=[th[0], th[-1], rr[0], rr[-1]], cmap=cmap,
+        vmin=-vt, vmax=vt, interpolation="nearest")
+    for yb in (lo, hi):
+        axes[0].axhline(yb, color="0.3", ls="--", lw=0.8, alpha=0.6)
+    axes[0].set_xlabel("theta (deg)")
+    axes[0].set_ylabel("r (normalized)")
+    fig.colorbar(im0, ax=axes[0], fraction=0.046, pad=0.04)
+
+    im1 = axes[1].imshow(
+        a["m_angle"], origin="lower", aspect="auto",
+        extent=[ta[0], ta[-1], rr[0], rr[-1]], cmap=cmap,
+        vmin=-va, vmax=va, interpolation="nearest")
+    for yb in (lo, hi):
+        axes[1].axhline(yb, color="0.3", ls="--", lw=0.8, alpha=0.6)
+    axes[1].set_xlabel("t (normalized)")
+    axes[1].set_ylabel("r (normalized)")
+    fig.colorbar(im1, ax=axes[1], fraction=0.046, pad=0.04)
+
+    im2 = axes[2].imshow(
+        a["m_radius"], origin="lower", aspect="auto",
+        extent=[ta[0], ta[-1], th[0], th[-1]], cmap=cmap,
+        vmin=-vr, vmax=vr, interpolation="nearest")
+    axes[2].set_xlabel("t (normalized)")
+    axes[2].set_ylabel("theta (deg)")
+    fig.colorbar(im2, ax=axes[2], fraction=0.046, pad=0.04)
+
+    for c in range(3):
+        axes[c].set_title(col_titles[c], fontsize=10)
+    fig.suptitle(f"{rec['tag']}  |  polar |error| DIFFERENCE "
+                 f"(* {value_scale:g}), n={rec['n_used']} shared "
+                 f"sims.  blue = second config has LESS error "
+                 f"(improvement)", fontsize=12, fontweight="bold")
     out_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(str(out_path), dpi=140, bbox_inches="tight")
     plt.close(fig)
