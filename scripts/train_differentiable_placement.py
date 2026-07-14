@@ -51,10 +51,39 @@ _ABCDEF = [(0.52, 0.0), (0.52, 45.0), (0.52, 90.0),
            (0.847, 0.0), (0.847, 45.0), (0.847, 90.0)]
 
 
+def _random_subsample_dir(npz_dir, limit, seed):
+    """Symlink a random `limit` sims into a temp dir so the loader's
+    first-N behavior samples a REPRESENTATIVE subset regardless of
+    filename ordering. Critical for merged datasets whose sorted
+    order groups all of one source first. Returns (tempdir_obj,
+    path) -- keep tempdir_obj alive until loading is done."""
+    import os
+    import tempfile
+    src = Path(npz_dir)
+    files = sorted(p for p in src.glob("*.npz")
+                   if not p.name.startswith("_"))
+    if not files:
+        raise ValueError(f"no npz in {npz_dir}")
+    rng = np.random.default_rng(seed)
+    n = min(limit, len(files))
+    pick = rng.choice(len(files), size=n, replace=False)
+    tmp = tempfile.TemporaryDirectory(prefix="diffplace_subsample_")
+    for i in pick:
+        f = files[int(i)].resolve()
+        os.symlink(f, Path(tmp.name) / f.name)
+    return tmp, tmp.name
+
+
 def _load_phi_and_a(basis_path, traj_path, npz_dir, K, nt,
-                    drop_first_steps, limit):
+                    drop_first_steps, limit, random_subsample=False,
+                    seed=7):
     """Return Phi (Nx*Ny, K), a (n_sim, K, Nt), (nx, ny). a comes
-    from a traj cache or is recomputed from a dataset subsample."""
+    from a traj cache or is recomputed from a dataset subsample.
+
+    random_subsample: when loading from npz_dir, pick `limit` sims
+    at random (via symlinks) instead of the loader's first-N by
+    filename -- avoids a biased subsample on ordered / merged
+    datasets."""
     with np.load(basis_path) as z:
         Phi = z["Phi"]
         nx, ny = (int(d) for d in z["spatial_shape"])
@@ -63,9 +92,20 @@ def _load_phi_and_a(basis_path, traj_path, npz_dir, K, nt,
             a = z["a_train_val"].astype(np.float64)
     elif npz_dir:
         from data.loader import load_dataset
-        _x, _y, sims = load_dataset(
-            npz_dir, nx=nx, ny=ny, nt=nt, limit=limit,
-            drop_first_steps=drop_first_steps)
+        tmp = None
+        if random_subsample:
+            tmp, load_dir = _random_subsample_dir(
+                npz_dir, limit, seed)
+            load_limit = None            # dir already holds exactly N
+        else:
+            load_dir, load_limit = npz_dir, limit
+        try:
+            _x, _y, sims = load_dataset(
+                load_dir, nx=nx, ny=ny, nt=nt, limit=load_limit,
+                drop_first_steps=drop_first_steps)
+        finally:
+            if tmp is not None:
+                tmp.cleanup()
         if not sims:
             raise ValueError(f"no sims from {npz_dir}")
         nspace = Phi.shape[0]
@@ -103,8 +143,8 @@ def _init_positions(init, n):
 def run(basis_path, *, traj_path=None, npz_dir=None, K=12, n=6,
         init="abcdef", r_min=0.2, r_max=0.98, epochs=300, lr=1e-3,
         pos_lr=2e-2, val_frac=0.2, seed=7, nt=300,
-        drop_first_steps=1, limit=400, channels=64,
-        dilations=(1, 2, 4, 8, 16, 32, 64), kernel=3,
+        drop_first_steps=1, limit=400, random_subsample=False,
+        channels=64, dilations=(1, 2, 4, 8, 16, 32, 64), kernel=3,
         device=None) -> dict:
     import torch
     import torch.nn.functional as F
@@ -117,7 +157,7 @@ def run(basis_path, *, traj_path=None, npz_dir=None, K=12, n=6,
 
     Phi, a_np, (nx, ny) = _load_phi_and_a(
         basis_path, traj_path, npz_dir, K, nt, drop_first_steps,
-        limit)
+        limit, random_subsample=random_subsample, seed=seed)
     K = Phi.shape[1]
     n_sim, _, Nt = a_np.shape
 
@@ -186,6 +226,13 @@ def run(basis_path, *, traj_path=None, npz_dir=None, K=12, n=6,
     vl_i = torch.tensor(val_idx, device=dev)
     pos_hist = [init_pos]
     val_hist = []
+    # per-epoch absolute movement of each sensor from its INIT
+    # position (canonical Cartesian distance) -- the convergence
+    # diagnostic: it flattening means the placement has settled.
+    init_xy = np.stack([init_pos[:, 0] * np.cos(np.deg2rad(init_pos[:, 1])),
+                        init_pos[:, 0] * np.sin(np.deg2rad(init_pos[:, 1]))],
+                       axis=1)                             # (n, 2)
+    move_hist = np.zeros((epochs, n), dtype=np.float64)
     best_val = np.inf
     best_pos = init_pos
 
@@ -201,6 +248,11 @@ def run(basis_path, *, traj_path=None, npz_dir=None, K=12, n=6,
         with torch.no_grad():
             r_par.clamp_(r_min, r_max)
             th_par.clamp_(0.0, 90.0)
+            rc = r_par.cpu().numpy()
+            tc = th_par.cpu().numpy()
+        cxy = np.stack([rc * np.cos(np.deg2rad(tc)),
+                        rc * np.sin(np.deg2rad(tc))], axis=1)
+        move_hist[ep] = np.sqrt(((cxy - init_xy) ** 2).sum(axis=1))
 
         if (ep + 1) % max(1, epochs // 30) == 0 or ep == epochs - 1:
             model.eval()
@@ -208,8 +260,7 @@ def run(basis_path, *, traj_path=None, npz_dir=None, K=12, n=6,
                 yv = measure(vl_i) / y_std
                 vloss = float(F.mse_loss(model(yv),
                                          a_norm[vl_i]))
-            cur = np.stack([r_par.detach().cpu().numpy(),
-                            th_par.detach().cpu().numpy()], axis=1)
+            cur = np.stack([rc, tc], axis=1)
             pos_hist.append(cur.copy())
             val_hist.append((ep + 1, float(loss.detach()), vloss))
             if vloss < best_val:
@@ -227,6 +278,7 @@ def run(basis_path, *, traj_path=None, npz_dir=None, K=12, n=6,
     return dict(init_pos=init_pos, final_pos=final_pos,
                 best_pos=best_pos, best_val=best_val,
                 pos_hist=pos_hist, val_hist=val_hist, moved=moved,
+                move_hist=move_hist,
                 K=K, n=n, r_min=r_min, r_max=r_max, n_sim=n_sim,
                 Nt=Nt)
 
@@ -236,9 +288,9 @@ def _render(res, out_path):
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    fig, (ax, axl) = plt.subplots(
-        1, 2, figsize=(13, 6.2),
-        gridspec_kw=dict(width_ratios=[1.3, 1.0]),
+    fig, (ax, axm, axl) = plt.subplots(
+        1, 3, figsize=(18, 5.6),
+        gridspec_kw=dict(width_ratios=[1.25, 1.0, 1.0]),
         constrained_layout=True)
     th = np.linspace(0, 90, 200)
     ax.plot(np.cos(np.deg2rad(th)), np.sin(np.deg2rad(th)),
@@ -255,27 +307,52 @@ def _render(res, out_path):
                 p[:, 0] * np.sin(np.deg2rad(p[:, 1])))
 
     ix, iy = xy(res["init_pos"])
-    fx, fy = xy(res["final_pos"])
-    # movement trails
-    for k in range(res["n"]):
-        ax.annotate("", xy=(fx[k], fy[k]), xytext=(ix[k], iy[k]),
-                    arrowprops=dict(arrowstyle="->", color="0.5",
-                                    lw=1.2, alpha=0.8))
-    ax.scatter(ix, iy, s=120, marker="s", facecolor="none",
-               edgecolor="0.4", linewidth=1.6, label="init (ABCDEF)")
-    ax.scatter(fx, fy, s=200, marker="o", color="#e63946",
-               edgecolor="black", linewidth=1.2, zorder=5,
+    fx, fy = xy(res["best_pos"])
+    # Full movement PATH per sensor (from pos_hist), drawn as a thin
+    # line so it is visible even where start/end markers overlap.
+    ph = res.get("pos_hist", [])
+    if len(ph) > 1:
+        paths = np.stack(ph, axis=0)              # (T_snap, n, 2)
+        for k in range(res["n"]):
+            px = paths[:, k, 0] * np.cos(np.deg2rad(paths[:, k, 1]))
+            py = paths[:, k, 0] * np.sin(np.deg2rad(paths[:, k, 1]))
+            ax.plot(px, py, "-", color="0.55", lw=1.2, alpha=0.9,
+                    zorder=3)
+    # init as hollow squares (drawn last-ish, no fill so arrows/paths
+    # underneath stay visible); optimized as SMALL solid dots so they
+    # do not cover the path lines.
+    ax.scatter(ix, iy, s=140, marker="s", facecolor="none",
+               edgecolor="0.35", linewidth=1.8, zorder=4,
+               label="init (ABCDEF)")
+    ax.scatter(fx, fy, s=70, marker="o", color="#e63946",
+               edgecolor="black", linewidth=0.8, zorder=6,
                label="optimized")
+    for k in range(res["n"]):
+        ax.annotate(str(k + 1), (fx[k], fy[k]), xytext=(7, 5),
+                    textcoords="offset points", fontsize=9,
+                    fontweight="bold", color="#e63946", zorder=7)
     ax.set_xlim(-0.08, 1.15)
     ax.set_ylim(-0.08, 1.15)
     ax.set_aspect("equal")
     ax.set_xlabel("x / R")
     ax.set_ylabel("y / R")
-    ax.set_title(f"Differentiable placement (n={res['n']}, "
-                 f"K={res['K']})")
+    ax.set_title(f"Placement paths (n={res['n']}, K={res['K']})")
     ax.legend(loc="upper right", fontsize=9)
     ax.grid(alpha=0.25)
 
+    # --- middle: per-sensor movement vs epoch (convergence) ---
+    mh = res.get("move_hist")
+    if mh is not None and mh.size:
+        ep = np.arange(1, mh.shape[0] + 1)
+        for k in range(res["n"]):
+            axm.plot(ep, mh[:, k], lw=1.4, label=f"sensor {k + 1}")
+        axm.set_xlabel("epoch")
+        axm.set_ylabel("distance moved from init (canonical)")
+        axm.set_title("sensor movement (flat = converged)")
+        axm.legend(fontsize=8, ncol=2)
+        axm.grid(alpha=0.3)
+
+    # --- right: loss ---
     vh = np.array(res["val_hist"])
     if vh.size:
         axl.plot(vh[:, 0], vh[:, 1], "-o", ms=3, label="train",
@@ -305,7 +382,7 @@ def main() -> int:
                     "[[r,theta],...] path")
     ap.add_argument("--r-min", type=float, default=0.2)
     ap.add_argument("--r-max", type=float, default=0.98)
-    ap.add_argument("--epochs", type=int, default=300)
+    ap.add_argument("--epochs", type=int, default=500)
     ap.add_argument("--lr", type=float, default=1e-3)
     ap.add_argument("--pos-lr", type=float, default=2e-2,
                     help="learning rate for sensor positions "
@@ -315,7 +392,13 @@ def main() -> int:
     ap.add_argument("--seed", type=int, default=7)
     ap.add_argument("--nt", type=int, default=300)
     ap.add_argument("--drop-first-steps", type=int, default=1)
-    ap.add_argument("--limit", type=int, default=400)
+    ap.add_argument("--limit", type=int, default=1000)
+    ap.add_argument("--random-subsample", action="store_true",
+                    help="pick the --limit sims at RANDOM (via "
+                    "symlinks) instead of the loader's first-N by "
+                    "filename. Use on ordered / merged datasets "
+                    "(e.g. prefixed symlinks) where the first N "
+                    "would all be one source / one regime.")
     ap.add_argument("--out", default=None)
     ap.add_argument("--positions-json", default=None)
     args = ap.parse_args()
@@ -329,7 +412,8 @@ def main() -> int:
               lr=args.lr, pos_lr=args.pos_lr, val_frac=args.val_frac,
               seed=args.seed, nt=args.nt,
               drop_first_steps=args.drop_first_steps,
-              limit=args.limit)
+              limit=args.limit,
+              random_subsample=args.random_subsample)
 
     print(f"\nfinal positions (best val={res['best_val']:.4e}):")
     print(f"  {'#':>2}  {'r_init':>7} {'th_init':>7}  ->  "
