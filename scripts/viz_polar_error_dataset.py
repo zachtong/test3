@@ -118,13 +118,21 @@ def _mean_std_error_cubes(tag, idx, output_dir, overrides, n_theta,
     return mean_cube, std_cube, thetas, rs, n_used
 
 
-def _aggregates(cube):
+def _aggregates(cube, r_band):
     """Collapse a (theta, r, t) cube to the three 2D views by
-    averaging one dimension each."""
+    averaging one dimension each.
+
+    r_band is a boolean mask over the r axis marking the mountable /
+    interesting radial band. The two views that KEEP r as an axis
+    (m_time, m_angle) average over all r (the full field is still
+    shown, just color-scaled to the band in _render). The view that
+    AGGREGATES r away (m_radius) averages over the BAND ONLY -- else
+    the unmountable extreme-r error (r<0.1 near the singular axis,
+    r>0.98 at the arc) contaminates the theta-time map."""
     return dict(
-        m_time=cube.mean(axis=2),      # (theta, r)
-        m_angle=cube.mean(axis=0),     # (r, t)
-        m_radius=cube.mean(axis=1))    # (theta, t)
+        m_time=cube.mean(axis=2),                 # (theta, r)
+        m_angle=cube.mean(axis=0),                # (r, t)
+        m_radius=cube[:, r_band, :].mean(axis=1)) # (theta, t) band only
 
 
 def _process_one_tag(task: dict) -> dict:
@@ -162,9 +170,14 @@ def _process_one_tag(task: dict) -> dict:
                     msg=f"{type(e).__name__}: {e}")
     nt = mean_cube.shape[-1]
     t_axis = np.linspace(0.0, 1.0, nt)
+    r_band = (rs >= task["r_focus_lo"]) & (rs <= task["r_focus_hi"])
+    if not r_band.any():
+        r_band = np.ones_like(rs, dtype=bool)
     rec = dict(tag=tag, n_used=n_used, thetas=thetas, rs=rs,
-               t_axis=t_axis, mean=_aggregates(mean_cube),
-               std=_aggregates(std_cube))
+               t_axis=t_axis, r_band=r_band,
+               clip_pctl=task["clip_pctl"],
+               mean=_aggregates(mean_cube, r_band),
+               std=_aggregates(std_cube, r_band))
     _render(rec, mean_path, task["value_scale"], stat="mean",
             cmap="magma")
     _render(rec, std_path, task["value_scale"], stat="std",
@@ -201,6 +214,20 @@ def main() -> int:
                     "cores/workers to avoid oversubscription.")
     ap.add_argument("--n-theta", type=int, default=91)
     ap.add_argument("--n-r", type=int, default=128)
+    ap.add_argument("--r-focus-lo", type=float, default=0.1,
+                    help="lower edge of the mountable / interesting "
+                    "radial band. Error outside [lo, hi] (near the "
+                    "singular center and the disk arc, where sensors "
+                    "cannot go) over-exposes so it does not wash out "
+                    "the mid-disk color scale, and is excluded from "
+                    "the radius-aggregated (theta-time) map. "
+                    "Default 0.1")
+    ap.add_argument("--r-focus-hi", type=float, default=0.98,
+                    help="upper edge of the mountable band "
+                    "(default 0.98)")
+    ap.add_argument("--clip-pctl", type=float, default=99.0,
+                    help="percentile within the band that sets the "
+                    "color vmax (default 99)")
     ap.add_argument("--value-scale", type=float, default=1.0e6)
     ap.add_argument("--output-dir", default="outputs")
     ap.add_argument("--out-dir", default="viz/polar_error",
@@ -219,6 +246,8 @@ def main() -> int:
         overrides=overrides, n_samples=args.n_samples,
         random=args.random, seed=args.seed, chunk=args.chunk,
         n_theta=args.n_theta, n_r=args.n_r,
+        r_focus_lo=args.r_focus_lo, r_focus_hi=args.r_focus_hi,
+        clip_pctl=args.clip_pctl,
         value_scale=args.value_scale,
         skip_existing=args.skip_existing) for tag in args.tags]
 
@@ -269,17 +298,34 @@ def _render(rec, out_path, value_scale, stat="mean", cmap="magma"):
 
     a = rec[stat]
     th, rr, ta = rec["thetas"], rec["rs"], rec["t_axis"]
+    band = rec["r_band"]
+    p = rec.get("clip_pctl", 99.0)
     word = "mean" if stat == "mean" else "std"
+    lo, hi = float(rr[band][0]), float(rr[band][-1])
     col_titles = [f"{word} |err| over time\n(where in the disk)",
                   f"{word} |err| over angle\n(which radius, when)",
-                  f"{word} |err| over radius\n(which angle, when)"]
+                  f"{word} |err| over radius\n(band r in "
+                  f"[{lo:.2g},{hi:.2g}])"]
+
+    # Color range from the mountable band only, so the unmountable
+    # extreme-r error (r<band or r>band) OVER-EXPOSES (saturates)
+    # instead of washing out the mid-disk detail.
+    def _vmax(arr):
+        arr = arr[np.isfinite(arr)]
+        return float(np.percentile(arr, p)) if arr.size else 1.0
+    vmax_t = _vmax(a["m_time"][:, band])       # (theta, r): band cols
+    vmax_a = _vmax(a["m_angle"][band, :])      # (r, t): band rows
+    vmax_r = _vmax(a["m_radius"])              # already band-averaged
 
     fig, axes = plt.subplots(1, 3, figsize=(16, 4.8),
                              constrained_layout=True)
+    # dashed guides marking the mountable band on the r-axis panels
     im0 = axes[0].imshow(
         a["m_time"].T, origin="lower", aspect="auto",
         extent=[th[0], th[-1], rr[0], rr[-1]], cmap=cmap,
-        vmin=0, interpolation="nearest")
+        vmin=0, vmax=vmax_t, interpolation="nearest")
+    for yb in (lo, hi):
+        axes[0].axhline(yb, color="w", ls="--", lw=0.8, alpha=0.6)
     axes[0].set_xlabel("theta (deg)")
     axes[0].set_ylabel("r (normalized)")
     fig.colorbar(im0, ax=axes[0], fraction=0.046, pad=0.04)
@@ -287,7 +333,9 @@ def _render(rec, out_path, value_scale, stat="mean", cmap="magma"):
     im1 = axes[1].imshow(
         a["m_angle"], origin="lower", aspect="auto",
         extent=[ta[0], ta[-1], rr[0], rr[-1]], cmap=cmap,
-        vmin=0, interpolation="nearest")
+        vmin=0, vmax=vmax_a, interpolation="nearest")
+    for yb in (lo, hi):
+        axes[1].axhline(yb, color="w", ls="--", lw=0.8, alpha=0.6)
     axes[1].set_xlabel("t (normalized)")
     axes[1].set_ylabel("r (normalized)")
     fig.colorbar(im1, ax=axes[1], fraction=0.046, pad=0.04)
@@ -295,7 +343,7 @@ def _render(rec, out_path, value_scale, stat="mean", cmap="magma"):
     im2 = axes[2].imshow(
         a["m_radius"], origin="lower", aspect="auto",
         extent=[ta[0], ta[-1], th[0], th[-1]], cmap=cmap,
-        vmin=0, interpolation="nearest")
+        vmin=0, vmax=vmax_r, interpolation="nearest")
     axes[2].set_xlabel("t (normalized)")
     axes[2].set_ylabel("theta (deg)")
     fig.colorbar(im2, ax=axes[2], fraction=0.046, pad=0.04)
