@@ -50,8 +50,13 @@ from scripts.viz_radial_kymograph import (              # noqa: E402
 # --- data loading ---------------------------------------------------
 
 def _load_a_for_dir(Phi, npz_dir, nx, ny, nt, drop, limit, seed):
-    """Modal coefficient trajectories a (n_sim, K, Nt) for a random
-    subsample of a dataset dir, projected onto the common Phi."""
+    """Modal coefficients a (n_sim, K, Nt) projected onto the common
+    Phi, AND the TRUE total field energy ||f||^2 per sim (n_sim,).
+
+    The true field energy is required for a meaningful truncation
+    floor: using only the retained modes' energy as the total makes
+    the floor at m=K identically zero (there is nothing left to
+    truncate), which hides the very drop we want to measure."""
     import os
     import tempfile
     from data.loader import load_dataset
@@ -74,10 +79,12 @@ def _load_a_for_dir(Phi, npz_dir, nx, ny, nt, drop, limit, seed):
         tmp.cleanup()
     nspace, K = Phi.shape
     a = np.empty((len(sims), K, nt), dtype=np.float64)
+    fe = np.empty(len(sims), dtype=np.float64)
     for i, s in enumerate(sims):
         f = np.asarray(s.f, dtype=np.float64).reshape(nspace, -1)
         a[i] = Phi.T @ f
-    return a
+        fe[i] = float(np.einsum("ij,ij->", f, f))    # ||f||^2
+    return a, fe
 
 
 # --- mode characterization ------------------------------------------
@@ -186,132 +193,176 @@ def _time_cluster(time_feat, k_hint):
     return best[2], best[1], best[0]
 
 
+def _patterns(res):
+    """Generalized pattern grouping: (n_time_clusters) x (sym/asym).
+
+    Time clusters are RENAMED by how fast they rise early on, so the
+    fastest is 'direct' and the rest are 'hold-1', 'hold-2', ... in
+    increasing hold length. This keeps the grouping correct when the
+    silhouette scan finds more than two time patterns (e.g. direct +
+    two different hold durations), which a hard-coded 2x2 would
+    wrongly merge.
+
+    Returns (pat_id, pat_names, time_names, is_asym)."""
+    tf = res["time_feat"]
+    tlab = res["time_label"]
+    n_tc = int(tlab.max()) + 1
+    early = tf.shape[1] // 3
+    rise = np.array([tf[tlab == c].mean(0)[:early].mean()
+                     if (tlab == c).any() else -np.inf
+                     for c in range(n_tc)])
+    order = np.argsort(-rise)            # fastest riser first
+    rank = {int(c): i for i, c in enumerate(order)}
+    time_names = ["direct" if i == 0 else f"hold-{i}"
+                  for i in range(n_tc)]
+    t_idx = np.array([rank[int(c)] for c in tlab])
+    is_asym = res["asym"] >= res["asym_split"]
+    pat_id = t_idx * 2 + is_asym.astype(int)
+    pat_names = [f"{time_names[i]}/{s}"
+                 for i in range(n_tc) for s in ("sym", "asym")]
+    return pat_id, pat_names, time_names, is_asym
+
+
 # --- rendering ------------------------------------------------------
 
 def _render(res, out_dir, value_scale=1.0e6):
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
+    from matplotlib.colors import LogNorm
 
-    src = res["source"]           # (n_sim,) 0=old 1=new
-    tlab = res["time_label"]      # (n_sim,)
-    asym = res["asym"]            # (n_sim,)
-    energy = res["energy"]        # (n_sim, K)
-    az = res["az_score"]          # (K,)
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    src = res["source"]
+    asym = res["asym"]
+    energy = res["energy"]
+    az = res["az_score"]
     K = energy.shape[1]
-    is_new = src == 1
-    is_old = src == 0
-    # symmetric vs asymmetric by the asym threshold (median gap)
-    asym_thr = res["asym_split"]
-    is_asym = asym >= asym_thr
+    is_old, is_new = src == 0, src == 1
+    pat_id, pat_names, time_names, is_asym = _patterns(res)
+    n_pat = len(pat_names)
 
-    # ---- Fig 1: the two axes (time cluster + asymmetry) ----
-    fig, axes = plt.subplots(1, 3, figsize=(16, 4.8),
+    # ---- Fig 1: the two axes ----
+    fig, axes = plt.subplots(1, 3, figsize=(17, 4.8),
                              constrained_layout=True)
-    # 1a: time-progress curves colored by time cluster
     tf = res["time_feat"]
+    tlab = res["time_label"]
     t_axis = np.linspace(0, 1, tf.shape[1])
-    for c in np.unique(tlab):
+    early = tf.shape[1] // 3
+    rise = np.array([tf[tlab == c].mean(0)[:early].mean()
+                     if (tlab == c).any() else -np.inf
+                     for c in range(int(tlab.max()) + 1)])
+    for i, c in enumerate(np.argsort(-rise)):
         m = tlab == c
+        if not m.any():
+            continue
         axes[0].plot(t_axis, tf[m].mean(0), lw=2,
-                     label=f"time-cluster {c} (n={int(m.sum())})")
+                     label=f"{time_names[i]} (n={int(m.sum())})")
         axes[0].fill_between(t_axis, tf[m].mean(0) - tf[m].std(0),
                              tf[m].mean(0) + tf[m].std(0), alpha=0.15)
     axes[0].set_xlabel("normalized time")
     axes[0].set_ylabel("bonding progress (mode-1, scaled)")
-    axes[0].set_title("TIME axis: direct vs hold-then-release")
+    axes[0].set_title(f"TIME axis: {len(time_names)} clusters found")
     axes[0].legend(fontsize=8)
     axes[0].grid(alpha=0.3)
-    # 1b: asymmetry histogram, old vs new
-    bins = np.linspace(0, max(asym.max(), 1e-3), 30)
+
+    hi = float(np.percentile(asym, 99.5)) if asym.size else 1e-3
+    bins = np.linspace(0, max(hi, 1e-3), 40)
     axes[1].hist(asym[is_old], bins=bins, alpha=0.6, label="old",
                  color="#3d5a80")
     axes[1].hist(asym[is_new], bins=bins, alpha=0.6, label="new",
                  color="#e63946")
-    axes[1].axvline(asym_thr, color="0.3", ls="--",
-                    label=f"split={asym_thr:.3f}")
-    axes[1].set_xlabel("asymmetry ratio (azimuthal energy frac)")
+    axes[1].axvline(res["asym_split"], color="0.2", ls="--", lw=1.8,
+                    label=f"split={res['asym_split']:.4f}\n"
+                          f"(old p{res.get('asym_pctl', 95):g})")
+    axes[1].set_xlabel("asymmetry ratio (azimuthal energy fraction)")
     axes[1].set_ylabel("count")
     axes[1].set_title("SPACE axis: symmetric vs asymmetric")
     axes[1].legend(fontsize=8)
-    # 1c: 2x2 pattern grid, old vs new counts
-    quad = np.array([["direct/sym", "direct/asym"],
-                     ["hold/sym", "hold/asym"]])
-    # map time clusters to direct(0)/hold(1) by which rises faster
-    tf_rise = np.array([tf[tlab == c].mean(0)[:tf.shape[1] // 3].mean()
-                        for c in range(tlab.max() + 1)])
-    direct_c = int(np.argmax(tf_rise))     # fastest early rise = direct
-    is_hold = tlab != direct_c
-    counts = np.zeros((2, 2, 2), dtype=int)   # [hold, asym, src]
-    for h in (0, 1):
-        for aq in (0, 1):
-            sel = (is_hold.astype(int) == h) & (is_asym.astype(int) == aq)
-            counts[h, aq, 0] = int((sel & is_old).sum())
-            counts[h, aq, 1] = int((sel & is_new).sum())
+
     axes[2].axis("off")
-    txt = ["2x2 pattern occupancy (old / new)\n"]
-    for h, hn in enumerate(["direct", "hold"]):
-        for aq, an in enumerate(["sym", "asym"]):
-            txt.append(f"  {hn:6s}/{an:4s}:  "
-                       f"old={counts[h, aq, 0]:4d}   "
-                       f"new={counts[h, aq, 1]:4d}")
-    axes[2].text(0.0, 0.95, "\n".join(txt), va="top", ha="left",
-                 family="monospace", fontsize=11,
+    txt = [f"Pattern occupancy  ({len(time_names)} time x 2 sym)\n",
+           f"{'pattern':16s} {'old':>6s} {'new':>6s}"]
+    for p in range(n_pat):
+        m = pat_id == p
+        txt.append(f"{pat_names[p]:16s} "
+                   f"{int((m & is_old).sum()):6d} "
+                   f"{int((m & is_new).sum()):6d}")
+    axes[2].text(0.0, 0.98, "\n".join(txt), va="top", ha="left",
+                 family="monospace", fontsize=10.5,
                  transform=axes[2].transAxes)
     fig.suptitle("Bonding patterns along two physical axes",
                  fontweight="bold")
-    (out_dir).mkdir(parents=True, exist_ok=True)
     fig.savefig(out_dir / "01_two_axes.png", dpi=140,
                 bbox_inches="tight")
     fig.savefig(out_dir / "01_two_axes.pdf", bbox_inches="tight")
     plt.close(fig)
 
-    # ---- Fig 2: pattern x mode occupancy heatmap ----
-    # define 4 patterns = (direct/hold) x (sym/asym)
-    pat_id = is_hold.astype(int) * 2 + is_asym.astype(int)
-    pat_names = ["direct/sym", "direct/asym", "hold/sym", "hold/asym"]
-    occ = np.zeros((4, K))
-    for p in range(4):
+    # ---- Fig 2: occupancy, log scale + per-mode contrast ----
+    occ = np.zeros((n_pat, K))
+    for p in range(n_pat):
         m = pat_id == p
         occ[p] = energy[m].mean(0) if m.any() else 0.0
-    fig, ax = plt.subplots(figsize=(1.1 * K + 2, 4.2),
-                           constrained_layout=True)
-    im = ax.imshow(occ, aspect="auto", cmap="magma",
-                   interpolation="nearest")
-    ax.set_xticks(range(K))
-    ax.set_xticklabels([f"m{k+1}" for k in range(K)])
-    ax.set_yticks(range(4))
-    ax.set_yticklabels([f"{pat_names[p]}\n(n={int((pat_id==p).sum())})"
-                        for p in range(4)])
-    # mark azimuthal modes
-    for k in range(K):
-        if az[k] >= res["az_thresh"]:
-            ax.text(k, -0.6, "az", ha="center", fontsize=8,
-                    color="#e63946")
-    ax.set_title("Pattern x mode occupancy (mean energy fraction; "
-                 "'az' = azimuthal mode)")
-    fig.colorbar(im, ax=ax, fraction=0.03)
+    fig, axes = plt.subplots(2, 1, figsize=(1.15 * K + 3, 7.5),
+                             constrained_layout=True)
+    # (a) absolute energy fraction, LOG scale so modes far below
+    # mode-1 remain visible instead of being crushed to black.
+    vmin = max(float(occ[occ > 0].min()) if (occ > 0).any() else 1e-6,
+               1e-6)
+    im0 = axes[0].imshow(np.maximum(occ, vmin), aspect="auto",
+                         cmap="magma", interpolation="nearest",
+                         norm=LogNorm(vmin=vmin, vmax=occ.max()))
+    axes[0].set_title("mean energy fraction per mode (LOG scale)")
+    fig.colorbar(im0, ax=axes[0], fraction=0.03)
+    # (b) per-mode contrast: each column divided by its mean across
+    # patterns -- shows which modes DISTINGUISH patterns, which is
+    # the actual question (mode-1 dominance cancels out here).
+    col_mean = occ.mean(axis=0, keepdims=True) + 1e-12
+    contrast = occ / col_mean
+    im1 = axes[1].imshow(contrast, aspect="auto", cmap="RdBu_r",
+                         interpolation="nearest", vmin=0, vmax=2)
+    axes[1].set_title("per-mode contrast (energy / column mean); "
+                      "red = this pattern over-excites this mode")
+    fig.colorbar(im1, ax=axes[1], fraction=0.03)
+    for ax in axes:
+        ax.set_xticks(range(K))
+        ax.set_xticklabels([f"m{k+1}" for k in range(K)])
+        ax.set_yticks(range(n_pat))
+        ax.set_yticklabels([f"{pat_names[p]}\n"
+                            f"(n={int((pat_id==p).sum())})"
+                            for p in range(n_pat)], fontsize=8)
+        for k in range(K):
+            if az[k] >= res["az_thresh"]:
+                ax.text(k, -0.62, "az", ha="center", fontsize=8,
+                        color="#2a9d8f", fontweight="bold")
+    fig.suptitle("Pattern x mode occupancy  ('az' = azimuthal mode)",
+                 fontweight="bold")
     fig.savefig(out_dir / "02_pattern_mode_occupancy.png", dpi=140,
                 bbox_inches="tight")
     fig.savefig(out_dir / "02_pattern_mode_occupancy.pdf",
                 bbox_inches="tight")
     plt.close(fig)
 
-    # ---- Fig 3: floor K8 vs K12 per pattern ----
-    fk = res["floor_k"]           # dict k -> (n_sim,) floor
+    # ---- Fig 3: truncation floor per pattern vs K ----
+    fk = res["floor_k"]
     ks = sorted(fk.keys())
-    fig, ax = plt.subplots(figsize=(9, 5), constrained_layout=True)
-    xg = np.arange(4)
-    w = 0.8 / len(ks)
+    fig, ax = plt.subplots(figsize=(2.0 + 1.6 * n_pat, 5),
+                           constrained_layout=True)
+    xg = np.arange(n_pat)
+    w = 0.8 / max(len(ks), 1)
     for i, kk in enumerate(ks):
-        vals = [float(np.mean(fk[kk][pat_id == p])) * value_scale
-                if (pat_id == p).any() else 0.0 for p in range(4)]
-        ax.bar(xg + i * w, vals, w, label=f"K={kk}")
+        vals = [float(np.mean(fk[kk][pat_id == p])) * 100.0
+                if (pat_id == p).any() else 0.0
+                for p in range(n_pat)]
+        b = ax.bar(xg + i * w, vals, w, label=f"K={kk}")
+        for bb, v in zip(b, vals):
+            ax.text(bb.get_x() + bb.get_width() / 2, v, f"{v:.2f}",
+                    ha="center", va="bottom", fontsize=7)
     ax.set_xticks(xg + w * (len(ks) - 1) / 2)
-    ax.set_xticklabels(pat_names)
-    ax.set_ylabel(f"truncation floor (|f_perp| * {value_scale:g})")
+    ax.set_xticklabels(pat_names, fontsize=8)
+    ax.set_ylabel("truncation floor (% of field energy)")
     ax.set_title("Per-pattern POD truncation floor vs K "
-                 "(drop = extra modes capture that pattern)")
+                 "(drop = the extra modes capture that pattern)")
     ax.legend()
     ax.grid(axis="y", alpha=0.3)
     fig.savefig(out_dir / "03_floor_by_pattern.png", dpi=140,
@@ -322,60 +373,69 @@ def _render(res, out_dir, value_scale=1.0e6):
 
 
 def _write_summary(res, out_dir):
-    src, tlab, asym = res["source"], res["time_label"], res["asym"]
-    energy, az = res["energy"], res["az_score"]
+    src, energy, az = res["source"], res["energy"], res["az_score"]
     is_new = src == 1
-    is_asym = asym >= res["asym_split"]
-    tf = res["time_feat"]
-    tf_rise = np.array([tf[tlab == c].mean(0)[:tf.shape[1] // 3].mean()
-                        for c in range(tlab.max() + 1)])
-    is_hold = tlab != int(np.argmax(tf_rise))
-    pat_id = is_hold.astype(int) * 2 + is_asym.astype(int)
-    pat_names = ["direct/sym", "direct/asym", "hold/sym", "hold/asym"]
+    pat_id, pat_names, time_names, is_asym = _patterns(res)
     K = energy.shape[1]
     az_modes = [k + 1 for k in range(K) if az[k] >= res["az_thresh"]]
 
-    lines = ["# Dataset pattern analysis\n"]
-    lines.append(f"Sims: old={int((src==0).sum())} "
-                 f"new={int(is_new.sum())}\n")
-    lines.append(f"Time clusters: {res['n_time_clusters']} "
-                 f"(silhouette {res['time_sil']:.3f})\n")
-    lines.append(f"Asymmetry split threshold: {res['asym_split']:.4f}\n")
-    lines.append(f"Azimuthal (asymmetric) modes: {az_modes}\n\n")
-    lines.append("## 2x2 pattern occupancy (old / new)\n")
-    for p in range(4):
+    L = ["# Dataset pattern analysis\n\n"]
+    L.append(f"Sims: old={int((src==0).sum())} "
+             f"new={int(is_new.sum())}\n")
+    L.append(f"Time clusters found: {res['n_time_clusters']} "
+             f"({', '.join(time_names)}), "
+             f"silhouette {res['time_sil']:.3f}\n")
+    L.append(f"Asymmetry split: {res['asym_split']:.4f} "
+             f"(old-dataset p{res.get('asym_pctl', 95):g})\n")
+    L.append(f"Azimuthal modes: {az_modes}\n\n")
+    L.append("## Pattern occupancy (old / new)\n")
+    for p in range(len(pat_names)):
         m = pat_id == p
-        lines.append(f"  {pat_names[p]:12s}: old="
-                     f"{int((m & (src==0)).sum()):4d}  "
-                     f"new={int((m & is_new).sum()):4d}\n")
-    # which modes are new-vs-old differentiating
+        L.append(f"  {pat_names[p]:16s}: old="
+                 f"{int((m & (src==0)).sum()):4d}  "
+                 f"new={int((m & is_new).sum()):4d}\n")
     e_old = energy[src == 0].mean(0)
-    e_new = energy[src == 1].mean(0) if is_new.any() else e_old
+    e_new = energy[is_new].mean(0) if is_new.any() else e_old
     diff = e_new - e_old
-    top = np.argsort(-np.abs(diff))[:5]
-    lines.append("\n## Modes most differently excited (new - old)\n")
-    for k in top:
-        lines.append(f"  mode {k+1}: old={e_old[k]:.3f} "
-                     f"new={e_new[k]:.3f}  delta={diff[k]:+.3f}"
-                     f"{'  (azimuthal)' if az[k]>=res['az_thresh'] else ''}\n")
-    (out_dir).mkdir(parents=True, exist_ok=True)
-    (out_dir / "summary.md").write_text("".join(lines))
-    print("".join(lines))
+    L.append("\n## Modes most differently excited (new - old)\n")
+    for k in np.argsort(-np.abs(diff))[:6]:
+        L.append(f"  mode {k+1:2d}: old={e_old[k]:.4f} "
+                 f"new={e_new[k]:.4f}  delta={diff[k]:+.4f}"
+                 f"{'  (azimuthal)' if az[k]>=res['az_thresh'] else ''}\n")
+    fk = res["floor_k"]
+    ks = sorted(fk.keys())
+    if len(ks) >= 2:
+        L.append(f"\n## Truncation floor drop K={ks[0]} -> K={ks[-1]}"
+                 f" (% of field energy)\n")
+        for p in range(len(pat_names)):
+            m = pat_id == p
+            if not m.any():
+                continue
+            lo = float(np.mean(fk[ks[0]][m])) * 100
+            hi = float(np.mean(fk[ks[-1]][m])) * 100
+            L.append(f"  {pat_names[p]:16s}: {lo:6.3f} -> {hi:6.3f}"
+                     f"   (drop {lo-hi:+.3f})\n")
+    Path(out_dir).mkdir(parents=True, exist_ok=True)
+    (Path(out_dir) / "summary.md").write_text("".join(L))
+    print("".join(L))
+
 
 
 def analyze(basis_path, old_dir, new_dir, K, nt, drop, limit,
-            k_hint, az_thresh, seed) -> dict:
+            k_hint, az_thresh, seed, asym_pctl=95.0,
+            asym_split_override=None) -> dict:
     with np.load(basis_path) as z:
         Phi = z["Phi"][:, :K]
         sigma = z["sigma"][:K]
         nx, ny = (int(d) for d in z["spatial_shape"])
     az_score = _azimuthal_score(Phi, nx, ny)
 
-    a_old = _load_a_for_dir(Phi, old_dir, nx, ny, nt, drop, limit,
-                            seed)
-    a_new = _load_a_for_dir(Phi, new_dir, nx, ny, nt, drop, limit,
-                            seed + 1)
+    a_old, fe_old = _load_a_for_dir(Phi, old_dir, nx, ny, nt, drop,
+                                    limit, seed)
+    a_new, fe_new = _load_a_for_dir(Phi, new_dir, nx, ny, nt, drop,
+                                    limit, seed + 1)
     a = np.concatenate([a_old, a_new], axis=0)
+    field_energy = np.concatenate([fe_old, fe_new])
     src = np.concatenate([np.zeros(len(a_old), int),
                           np.ones(len(a_new), int)])
 
@@ -384,21 +444,25 @@ def analyze(basis_path, old_dir, new_dir, K, nt, drop, limit,
     asym = _asymmetry_ratio(energy, az_score, az_thresh)
     tlab, n_tc, sil = _time_cluster(time_feat, k_hint)
 
-    # asymmetry split: midpoint between the two natural groups (Otsu-ish
-    # via the gap in a sorted asym array)
-    s = np.sort(asym)
-    gaps = np.diff(s)
-    split = float((s[gaps.argmax()] + s[gaps.argmax() + 1]) / 2) \
-        if len(s) > 1 else 0.0
+    # Asymmetry split. The distribution is CONTINUOUS, not bimodal, so
+    # a max-gap heuristic picks a meaningless cut. Instead use the OLD
+    # dataset as the symmetric reference: anything above its
+    # asym_pctl-th percentile is "more asymmetric than the symmetric
+    # reference ever gets". An explicit --asym-split overrides this.
+    if asym_split_override is not None:
+        split = float(asym_split_override)
+    else:
+        ref = asym[src == 0]
+        split = float(np.percentile(ref, asym_pctl)) if ref.size \
+            else float(np.median(asym))
 
-    # truncation floor per sim at K=8 and K (=12): fraction of energy
-    # NOT captured by the first m modes, using the full-K energy as a
-    # proxy for total (we only have K modes, so this is relative among
-    # the retained modes -- the drop between 8 and 12 is what matters).
+    # Truncation floor per sim at m modes, against the TRUE total
+    # field energy ||f||^2 (not the retained-mode sum -- that would
+    # make the floor at m=K identically zero and hide the drop).
     e_raw = (a ** 2).sum(axis=2)                            # (n_sim, K)
-    total = e_raw.sum(axis=1) + 1e-12
+    total = field_energy + 1e-30
     floor_k = {}
-    for m in (8, K):
+    for m in sorted({8, K}):
         if m <= K:
             floor_k[m] = np.sqrt(
                 np.maximum(total - e_raw[:, :m].sum(axis=1), 0.0)
@@ -406,7 +470,8 @@ def analyze(basis_path, old_dir, new_dir, K, nt, drop, limit,
     return dict(source=src, energy=energy, az_score=az_score,
                 az_thresh=az_thresh, time_feat=time_feat,
                 time_label=tlab, n_time_clusters=n_tc, time_sil=sil,
-                asym=asym, asym_split=split, floor_k=floor_k,
+                asym=asym, asym_split=split, asym_pctl=asym_pctl,
+                floor_k=floor_k, field_energy=field_energy,
                 sigma=sigma)
 
 
@@ -426,7 +491,17 @@ def main() -> int:
                     "(default 2: direct + hold)")
     ap.add_argument("--az-thresh", type=float, default=0.35,
                     help="azimuthal-score threshold above which a "
-                    "mode counts as asymmetric (default 0.35)")
+                    "MODE counts as azimuthal (default 0.35)")
+    ap.add_argument("--asym-pctl", type=float, default=95.0,
+                    help="a SIM counts as asymmetric if its asymmetry "
+                    "ratio exceeds this percentile of the OLD "
+                    "dataset, which serves as the symmetric "
+                    "reference (default 95). The distribution is "
+                    "continuous, so this reference-based cut is far "
+                    "more meaningful than looking for a gap.")
+    ap.add_argument("--asym-split", type=float, default=None,
+                    help="absolute asymmetry threshold; overrides "
+                    "--asym-pctl")
     ap.add_argument("--seed", type=int, default=7)
     ap.add_argument("--out-dir", default="viz/pattern_analysis")
     args = ap.parse_args()
@@ -436,7 +511,9 @@ def main() -> int:
         return 2
     res = analyze(args.basis, args.old_npz_dir, args.new_npz_dir,
                   args.k, args.nt, args.drop_first_steps, args.limit,
-                  args.k_hint, args.az_thresh, args.seed)
+                  args.k_hint, args.az_thresh, args.seed,
+                  asym_pctl=args.asym_pctl,
+                  asym_split_override=args.asym_split)
     out = Path(args.out_dir)
     _render(res, out)
     _write_summary(res, out)
