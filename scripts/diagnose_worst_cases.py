@@ -222,6 +222,10 @@ def main() -> int:
     ap.add_argument("--top-n", type=int, default=20,
                     help="how many worst sims to inspect "
                     "(default: 20)")
+    ap.add_argument("--out-json", default=None,
+                    help="also write the numbers (per-tag stats + "
+                    "cross-tag worst-N absolute-metric table) to "
+                    "this JSON, for downstream reporting/plotting")
     args = ap.parse_args()
 
     outputs = Path(args.outputs)
@@ -249,7 +253,39 @@ def main() -> int:
         _compare_metrics_table(datasets, args.top_n)
         _compare_hard_sims(datasets, args.top_n)
 
+    if args.out_json:
+        _write_json(datasets, args.top_n, Path(args.out_json))
+        print(f"\nwrote {args.out_json}")
+
     return 0
+
+
+def _write_json(datasets, top_n, path):
+    """Serialize the per-tag stats and the cross-tag worst-N table."""
+    out = {"top_n": top_n, "tags": []}
+    for d in datasets:
+        field = d["field"]
+        floor = d["floor"]
+        gap = field / np.maximum(floor, 1e-24)
+        order = np.argsort(-field)[:top_n]
+        wn_field = float(np.mean(field[order]))
+        wn_floor = float(np.mean(floor[order]))
+        out["tags"].append(dict(
+            tag=d["tag"],
+            n_test=int(len(field)),
+            median=_num(d.get("median")),
+            p95=_num(d.get("p95")),
+            gap_to_floor=_num(d.get("gap_to_floor")),
+            worst_n_field=wn_field,
+            worst_n_floor=wn_floor,
+            worst_n_gap=wn_field / max(wn_floor, 1e-24),
+            worst_n_basenames=[d["names"][i] for i in order]))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(out, indent=2))
+
+
+def _num(v):
+    return None if v is None else float(v)
 
 
 if __name__ == "__main__":
