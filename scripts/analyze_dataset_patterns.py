@@ -274,7 +274,7 @@ def _render(res, out_dir, value_scale=1.0e6):
                  color="#e63946")
     axes[1].axvline(res["asym_split"], color="0.2", ls="--", lw=1.8,
                     label=f"split={res['asym_split']:.4f}\n"
-                          f"(old p{res.get('asym_pctl', 95):g})")
+                          f"({res.get('split_source', 'fixed')})")
     axes[1].set_xlabel("asymmetry ratio (azimuthal energy fraction)")
     axes[1].set_ylabel("count")
     axes[1].set_title("SPACE axis: symmetric vs asymmetric")
@@ -386,7 +386,7 @@ def _write_summary(res, out_dir):
              f"({', '.join(time_names)}), "
              f"silhouette {res['time_sil']:.3f}\n")
     L.append(f"Asymmetry split: {res['asym_split']:.4f} "
-             f"(old-dataset p{res.get('asym_pctl', 95):g})\n")
+             f"({res.get('split_source', 'fixed')})\n")
     L.append(f"Azimuthal modes: {az_modes}\n\n")
     L.append("## Pattern occupancy (old / new)\n")
     for p in range(len(pat_names)):
@@ -422,8 +422,9 @@ def _write_summary(res, out_dir):
 
 
 def analyze(basis_path, old_dir, new_dir, K, nt, drop, limit,
-            k_hint, az_thresh, seed, asym_pctl=95.0,
-            asym_split_override=None) -> dict:
+            k_hint, az_thresh, seed, asym_pctl=None,
+            asym_split_override=None,
+            asym_split_default=0.002) -> dict:
     with np.load(basis_path) as z:
         Phi = z["Phi"][:, :K]
         sigma = z["sigma"][:K]
@@ -444,17 +445,24 @@ def analyze(basis_path, old_dir, new_dir, K, nt, drop, limit,
     asym = _asymmetry_ratio(energy, az_score, az_thresh)
     tlab, n_tc, sil = _time_cluster(time_feat, k_hint)
 
-    # Asymmetry split. The distribution is CONTINUOUS, not bimodal, so
-    # a max-gap heuristic picks a meaningless cut. Instead use the OLD
-    # dataset as the symmetric reference: anything above its
-    # asym_pctl-th percentile is "more asymmetric than the symmetric
-    # reference ever gets". An explicit --asym-split overrides this.
+    # Asymmetry split. "How much azimuthal energy still counts as
+    # symmetric" is a PHYSICAL judgement, so the default is a small
+    # fixed threshold (asym_split_default) meaning "essentially any
+    # azimuthal content is asymmetric". --asym-split sets it
+    # explicitly. --asym-pctl (old-dataset percentile) is offered as
+    # a data-driven alternative but is NOT the default, because the
+    # distribution is continuous and a percentile lands too high.
     if asym_split_override is not None:
         split = float(asym_split_override)
-    else:
+        split_source = "--asym-split"
+    elif asym_pctl is not None:
         ref = asym[src == 0]
         split = float(np.percentile(ref, asym_pctl)) if ref.size \
             else float(np.median(asym))
+        split_source = f"old p{asym_pctl:g}"
+    else:
+        split = float(asym_split_default)
+        split_source = "default fixed"
 
     # Truncation floor per sim at m modes, against the TRUE total
     # field energy ||f||^2 (not the retained-mode sum -- that would
@@ -470,7 +478,8 @@ def analyze(basis_path, old_dir, new_dir, K, nt, drop, limit,
     return dict(source=src, energy=energy, az_score=az_score,
                 az_thresh=az_thresh, time_feat=time_feat,
                 time_label=tlab, n_time_clusters=n_tc, time_sil=sil,
-                asym=asym, asym_split=split, asym_pctl=asym_pctl,
+                asym=asym, asym_split=split,
+                split_source=split_source,
                 floor_k=floor_k, field_energy=field_energy,
                 sigma=sigma)
 
@@ -492,16 +501,21 @@ def main() -> int:
     ap.add_argument("--az-thresh", type=float, default=0.35,
                     help="azimuthal-score threshold above which a "
                     "MODE counts as azimuthal (default 0.35)")
-    ap.add_argument("--asym-pctl", type=float, default=95.0,
-                    help="a SIM counts as asymmetric if its asymmetry "
-                    "ratio exceeds this percentile of the OLD "
-                    "dataset, which serves as the symmetric "
-                    "reference (default 95). The distribution is "
-                    "continuous, so this reference-based cut is far "
-                    "more meaningful than looking for a gap.")
     ap.add_argument("--asym-split", type=float, default=None,
-                    help="absolute asymmetry threshold; overrides "
-                    "--asym-pctl")
+                    help="absolute asymmetry-ratio threshold: a SIM "
+                    "with more azimuthal-energy fraction than this "
+                    "is asymmetric. This is a PHYSICAL choice -- set "
+                    "it to how much azimuthal content you consider "
+                    "still symmetric (e.g. 0.002). Default: "
+                    "0.002.")
+    ap.add_argument("--asym-pctl", type=float, default=None,
+                    help="ALTERNATIVE data-driven split: asymmetric "
+                    "if above this percentile of the OLD (reference) "
+                    "dataset. Off by default; --asym-split is "
+                    "preferred since the distribution is continuous.")
+    ap.add_argument("--asym-split-default", type=float, default=0.002,
+                    help="fixed split used when neither --asym-split "
+                    "nor --asym-pctl is given (default 0.002)")
     ap.add_argument("--seed", type=int, default=7)
     ap.add_argument("--out-dir", default="viz/pattern_analysis")
     args = ap.parse_args()
@@ -513,7 +527,8 @@ def main() -> int:
                   args.k, args.nt, args.drop_first_steps, args.limit,
                   args.k_hint, args.az_thresh, args.seed,
                   asym_pctl=args.asym_pctl,
-                  asym_split_override=args.asym_split)
+                  asym_split_override=args.asym_split,
+                  asym_split_default=args.asym_split_default)
     out = Path(args.out_dir)
     _render(res, out)
     _write_summary(res, out)
