@@ -421,16 +421,16 @@ def _write_summary(res, out_dir):
 
 
 
-def analyze(basis_path, old_dir, new_dir, K, nt, drop, limit,
-            k_hint, az_thresh, seed, asym_pctl=None,
-            asym_split_override=None,
-            asym_split_default=0.002) -> dict:
+def _load_core(basis_path, old_dir, new_dir, K, nt, drop, limit,
+               seed):
+    """The EXPENSIVE part: load + project both datasets and score the
+    modes. Returns the raw arrays that never change with the split /
+    plotting choices, so they can be cached to disk and reused."""
     with np.load(basis_path) as z:
         Phi = z["Phi"][:, :K]
         sigma = z["sigma"][:K]
         nx, ny = (int(d) for d in z["spatial_shape"])
     az_score = _azimuthal_score(Phi, nx, ny)
-
     a_old, fe_old = _load_a_for_dir(Phi, old_dir, nx, ny, nt, drop,
                                     limit, seed)
     a_new, fe_new = _load_a_for_dir(Phi, new_dir, nx, ny, nt, drop,
@@ -439,6 +439,45 @@ def analyze(basis_path, old_dir, new_dir, K, nt, drop, limit,
     field_energy = np.concatenate([fe_old, fe_new])
     src = np.concatenate([np.zeros(len(a_old), int),
                           np.ones(len(a_new), int)])
+    return dict(a=a, field_energy=field_energy, src=src,
+                az_score=az_score, sigma=sigma, K=int(K))
+
+
+def _save_core(core, path):
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    np.savez(path, a=core["a"].astype(np.float32),
+             field_energy=core["field_energy"], src=core["src"],
+             az_score=core["az_score"], sigma=core["sigma"],
+             K=np.int64(core["K"]))
+
+
+def _load_core_cache(path):
+    with np.load(path, allow_pickle=False) as z:
+        return dict(a=z["a"].astype(np.float64),
+                    field_energy=z["field_energy"],
+                    src=z["src"], az_score=z["az_score"],
+                    sigma=z["sigma"], K=int(z["K"]))
+
+
+def analyze(basis_path, old_dir, new_dir, K, nt, drop, limit,
+            k_hint, az_thresh, seed, asym_pctl=None,
+            asym_split_override=None,
+            asym_split_default=0.002, core=None) -> dict:
+    """Cheap post-processing on top of the (optionally cached) core
+    arrays: clustering, asymmetry split, floors. Re-runnable in
+    seconds when only the split / K / thresholds change."""
+    if core is None:
+        core = _load_core(basis_path, old_dir, new_dir, K, nt, drop,
+                          limit, seed)
+    a = core["a"]
+    field_energy = core["field_energy"]
+    src = core["src"]
+    az_score = core["az_score"]
+    sigma = core["sigma"]
+    K = min(K, a.shape[1])
+    a = a[:, :K, :]
+    az_score = az_score[:K]
 
     time_feat = _time_feature(a)
     energy = _modal_energy(a)
@@ -488,8 +527,10 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--basis", required=True,
                     help="merged POD basis pod3d_*.npz (common frame)")
-    ap.add_argument("--old-npz-dir", required=True)
-    ap.add_argument("--new-npz-dir", required=True)
+    ap.add_argument("--old-npz-dir", default=None,
+                    help="required unless --use-cache")
+    ap.add_argument("--new-npz-dir", default=None,
+                    help="required unless --use-cache")
     ap.add_argument("--k", type=int, default=12)
     ap.add_argument("--nt", type=int, default=300)
     ap.add_argument("--drop-first-steps", type=int, default=1)
@@ -518,17 +559,50 @@ def main() -> int:
                     "nor --asym-pctl is given (default 0.002)")
     ap.add_argument("--seed", type=int, default=7)
     ap.add_argument("--out-dir", default="viz/pattern_analysis")
+    ap.add_argument("--use-cache", action="store_true",
+                    help="reuse the cached loaded/projected data "
+                    "(<out-dir>/core_cache.npz) instead of reloading "
+                    "the datasets. Lets you re-tune --asym-split / "
+                    "--az-thresh / --k-hint and redraw in SECONDS "
+                    "without the ~1h data load. The first (non-cache) "
+                    "run writes the cache automatically.")
     args = ap.parse_args()
 
     if not Path(args.basis).is_file():
         print(f"basis not found: {args.basis}", file=sys.stderr)
         return 2
+
+    cache = Path(args.out_dir) / "core_cache.npz"
+    core = None
+    if args.use_cache:
+        if not cache.is_file():
+            print(f"--use-cache but no cache at {cache}; run once "
+                  f"without --use-cache first", file=sys.stderr)
+            return 2
+        print(f"reusing cached core: {cache}", flush=True)
+        core = _load_core_cache(cache)
+    else:
+        if not args.old_npz_dir or not args.new_npz_dir:
+            print("provide --old-npz-dir and --new-npz-dir (or "
+                  "--use-cache)", file=sys.stderr)
+            return 2
+        print("loading + projecting datasets (this is the slow "
+              "part) ...", flush=True)
+        core = _load_core(args.basis, args.old_npz_dir,
+                          args.new_npz_dir, args.k, args.nt,
+                          args.drop_first_steps, args.limit,
+                          args.seed)
+        _save_core(core, cache)
+        print(f"cached core -> {cache} (reuse with --use-cache)",
+              flush=True)
+
     res = analyze(args.basis, args.old_npz_dir, args.new_npz_dir,
                   args.k, args.nt, args.drop_first_steps, args.limit,
                   args.k_hint, args.az_thresh, args.seed,
                   asym_pctl=args.asym_pctl,
                   asym_split_override=args.asym_split,
-                  asym_split_default=args.asym_split_default)
+                  asym_split_default=args.asym_split_default,
+                  core=core)
     out = Path(args.out_dir)
     _render(res, out)
     _write_summary(res, out)
