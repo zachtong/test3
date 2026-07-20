@@ -609,7 +609,10 @@ def main() -> int:
     if args.from_history:
         res = _load_history(args.from_history)
         res["best_val"] = float("nan")
-        _print_summary(res)
+        pos_json = _print_summary(res)
+        if args.positions_json:
+            Path(args.positions_json).write_text(pos_json)
+            print(f"wrote {args.positions_json}")
         if args.out:
             _render(res, Path(args.out))
             print(f"wrote {args.out}")
