@@ -88,7 +88,10 @@ def _train(tag, positions, args) -> bool:
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument("--npz-dir", required=True, help="merged dataset dir")
+    ap.add_argument(
+        "--npz-dir",
+        default="/data/3D_wafer_bonding/sim_dataset_big_firehorse_1_and_2/",
+        help="merged dataset dir (defaults to the firehorse_1_and_2 set)")
     ap.add_argument("--config", default="configs/default.yaml")
     ap.add_argument("--pod-k", type=int, default=12)
     ap.add_argument("--pod-workers", type=int, default=64)
