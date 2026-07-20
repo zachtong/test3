@@ -26,11 +26,36 @@ def test_uniform_outer_init_on_outer_ring_spread_in_angle():
     assert np.allclose(th, np.linspace(0, 90, 6))          # 0,18,...,90
 
 
+def test_diag45_init_on_the_diagonal_spread_in_radius():
+    r, th = DP._init_positions("diag45", 6, r_min=0.2, r_max=0.98)
+    assert np.allclose(th, 45.0)                            # all on 45-deg ray
+    assert np.allclose(r, np.linspace(0.2, 0.98, 6))
+
+
 def test_abcdef_and_json_init():
     r, th = DP._init_positions("abcdef", 6)
     assert th.tolist() == [0, 45, 90, 0, 45, 90]
     r2, th2 = DP._init_positions("[[0.5,10],[0.6,80]]", 2)
     assert r2.tolist() == [0.5, 0.6] and th2.tolist() == [10, 80]
+
+
+def test_init_from_json_file(tmp_path):
+    f = tmp_path / "pos.json"
+    f.write_text("[[0.3, 15], [0.9, 75]]")
+    r, th = DP._init_positions(str(f), 2)
+    assert r.tolist() == [0.3, 0.9] and th.tolist() == [15, 75]
+
+
+def test_mangled_inline_json_raises_clear_error_not_file_error():
+    # a bracket string the shell could have mangled: must NOT become a
+    # 'no such file' error, but a clear ValueError mentioning the shell
+    with pytest.raises(ValueError, match="did not parse|inline JSON"):
+        DP._init_positions("[[0.2,45],[0.36,45", 2)     # truncated JSON
+
+
+def test_nonexistent_path_init_raises_clear_error():
+    with pytest.raises(ValueError, match="not a preset|existing file"):
+        DP._init_positions("does_not_exist.json", 2)
 
 
 @pytest.mark.parametrize("param", _PARAMS)

@@ -137,24 +137,52 @@ def _load_phi_and_a(basis_path, traj_path, npz_dir, K, nt,
     return Phi[:, :k], a[:, :k, :], (nx, ny)
 
 
-def _init_positions(init, n, r_max=0.98):
+def _parse_positions(spec):
+    """Parse an --init spec that is either inline JSON [[r,theta],...] OR a
+    path to a JSON file with the same content. Fails with a CLEAR, actionable
+    message rather than silently reinterpreting a mangled JSON string as a
+    filename (which produced a confusing 'no such file' error)."""
+    s = spec.strip()
+    if s.startswith("["):
+        try:
+            return json.loads(s)
+        except json.JSONDecodeError as e:
+            raise ValueError(
+                f"--init looks like inline JSON but did not parse ({e}). Your "
+                f"shell most likely mangled the brackets/quotes (zsh treats "
+                f"[ ] as globs, and pasting can turn ' into a smart quote) -- "
+                f"write the positions to a file and pass --init <file.json>. "
+                f"got: {spec[:80]!r}") from e
+    p = Path(spec)
+    if not p.is_file():
+        raise ValueError(
+            f"--init {spec!r} is not a preset (abcdef / uniform-outer / diag45 "
+            f"/ random), not inline JSON (must start with '['), and not an "
+            f"existing file. For inline positions the shell probably stripped "
+            f"the quotes; put them in a file and pass its path.")
+    try:
+        return json.loads(p.read_text())
+    except json.JSONDecodeError as e:
+        raise ValueError(f"--init file {spec!r} is not valid JSON: {e}") from e
+
+
+def _init_positions(init, n, r_min=0.2, r_max=0.98):
     if init == "abcdef":
         base = _ABCDEF
     elif init == "uniform-outer":
-        # all sensors on the outermost mountable ring, angles spread
-        # uniformly across [0, 90] deg -- 4 of 6 land OFF the mirror
-        # axes, so they can feel a real tangential gradient.
+        # outer ring, angles spread across [0, 90] deg -- 4 of 6 land OFF the
+        # mirror axes so they can feel a real tangential gradient.
         return (np.full(n, r_max, dtype=np.float64),
                 np.linspace(0.0, 90.0, n))
+    elif init == "diag45":
+        # all on the 45-deg diagonal (NOT a mirror axis -> free to move in
+        # angle), radii spread uniformly across the feasible band.
+        return (np.linspace(r_min, r_max, n),
+                np.full(n, 45.0, dtype=np.float64))
     elif init == "random":
         return None                                  # filled later
     else:
-        # accept an inline JSON string [[r,theta],...] OR a path to
-        # a JSON file with the same content
-        try:
-            base = json.loads(init)
-        except (json.JSONDecodeError, ValueError):
-            base = json.loads(Path(init).read_text())
+        base = _parse_positions(init)
     if len(base) < n:
         raise ValueError(f"init has {len(base)} < n={n} positions")
     base = base[:n]
@@ -277,7 +305,7 @@ def run(basis_path, *, traj_path=None, npz_dir=None, K=12, n=6,
     a_std = a_t.std(dim=(0, 2), keepdim=True).clamp_min(1e-8)
     a_norm = a_t / a_std
 
-    ip = _init_positions(init, n, r_max)
+    ip = _init_positions(init, n, r_min, r_max)
     if ip is None:
         r0 = rng.uniform(r_min, r_max, n)
         th0 = rng.uniform(0, 90, n)
@@ -565,9 +593,12 @@ def main() -> int:
     ap.add_argument("--K", type=int, default=12)
     ap.add_argument("--n", type=int, default=6)
     ap.add_argument("--init", default="abcdef",
-                    help="'abcdef', 'uniform-outer' (n sensors on the "
-                    "outer ring at angles linspace(0,90,n)), 'random', "
-                    "or a JSON [[r,theta],...] string/path")
+                    help="'abcdef'; 'uniform-outer' (n sensors on the outer "
+                    "ring at angles linspace(0,90,n)); 'diag45' (n sensors on "
+                    "the 45-deg ray, radii linspace(r_min,r_max,n)); 'random'; "
+                    "or positions as inline JSON [[r,theta],...] OR a path to a "
+                    "JSON file. Prefer a FILE for custom positions -- shells "
+                    "(zsh) mangle inline [ ] brackets.")
     ap.add_argument("--param", default="cartesian",
                     choices=["cartesian", "polar-rad", "polar-deg"],
                     help="position parameterization. 'cartesian' "
