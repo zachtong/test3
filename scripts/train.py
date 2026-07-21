@@ -27,7 +27,8 @@ from training.dataset import build_trajectory_dataset, normalize_dataset
 from training.loss import make_channel_weights
 from training.loop import train_one_seed
 from training.checkpoint import (checkpoint_path, history_path, latest_path,
-                                  save_checkpoint, load_checkpoint)
+                                  save_checkpoint, load_checkpoint,
+                                  history_len, seed_is_complete)
 from training.normalization import save_norm_stats
 from training.basis_cache import load_or_fit_basis, load_cached_basis
 from training.traj_cache import (_traj_key, traj_cache_path,
@@ -229,11 +230,16 @@ def main() -> None:
             channels=cfg.model.channels, dilations=cfg.model.dilations,
             kernel=cfg.model.kernel, dropout=cfg.model.dropout,
             causal=cfg.model.causal).to(device)
-        if cp.exists():
+        if seed_is_complete(cp, hp, cfg.train.epochs):
             print(f"seed={seed}: cached")
             load_checkpoint(model, cp, hp, device)
         else:
-            print(f"seed={seed}: training ...")
+            if cp.exists():
+                print(f"seed={seed}: checkpoint INCOMPLETE "
+                      f"({history_len(hp)}/{cfg.train.epochs} ep, likely "
+                      f"interrupted) -- retraining")
+            else:
+                print(f"seed={seed}: training ...")
             model, _ = train_one_seed(
                 model, x_tr, y_tr, x_vl, y_vl,
                 weights, cfg.train, device, seed,
