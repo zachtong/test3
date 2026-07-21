@@ -311,9 +311,9 @@ def run(basis_path, *, traj_path=None, npz_dir=None, K=12, n=6,
                      rep_coef=rep_coef)
 
 
-def _optimize(Phi, a_np, nx, ny, *, n=6, init="random", param="cartesian",
-              r_min=0.2, r_max=0.98, epochs=300, lr=1e-3, pos_lr=2e-2,
-              val_frac=0.2, seed=7, channels=64,
+def _optimize(Phi, a_np, nx, ny, *, n=6, init="random", init_positions=None,
+              param="cartesian", r_min=0.2, r_max=0.98, epochs=300, lr=1e-3,
+              pos_lr=2e-2, val_frac=0.2, seed=7, channels=64,
               dilations=(1, 2, 4, 8, 16, 32, 64), kernel=3, device=None,
               verbose=True, min_sep=0.1, rep_coef=50.0) -> dict:
     """Gradient-optimize sensor positions on ALREADY-loaded Phi/a. Split out of
@@ -341,11 +341,15 @@ def _optimize(Phi, a_np, nx, ny, *, n=6, init="random", param="cartesian",
     a_std = a_t.std(dim=(0, 2), keepdim=True).clamp_min(1e-8)
     a_norm = a_t / a_std
 
-    ip = _init_positions(init, n, r_min, r_max)
-    if ip is None:
-        r0, th0 = _spread_random_init(rng, n, r_min, r_max, min_sep)
+    if init_positions is not None:
+        arr = np.asarray(init_positions, dtype=np.float64).reshape(-1, 2)
+        r0, th0 = arr[:, 0].copy(), arr[:, 1].copy()
     else:
-        r0, th0 = ip
+        ip = _init_positions(init, n, r_min, r_max)
+        if ip is None:
+            r0, th0 = _spread_random_init(rng, n, r_min, r_max, min_sep)
+        else:
+            r0, th0 = ip
     place = _Placement(r0, th0, param, r_min, r_max, dev)
     init_pos = np.stack([r0, th0], axis=1).copy()
 
