@@ -22,6 +22,7 @@ in-loop validation loss, and:
 from __future__ import annotations
 import argparse
 import json
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -35,6 +36,7 @@ if str(_root) not in sys.path:
 from scripts.train_differentiable_placement import (        # noqa: E402
     _load_phi_and_a, _optimize)
 
+PY = sys.executable
 _NPZ_DEFAULT = "/data/3D_wafer_bonding/sim_dataset_big_firehorse_1_and_2/"
 
 
@@ -114,13 +116,19 @@ def main() -> int:
     ap.add_argument("--no-random-subsample", action="store_true",
                     help="disable random subsampling of the --limit sims "
                     "(on by default, needed for the merged/ordered dataset)")
-    ap.add_argument("--restarts", type=int, default=40,
-                    help="number of random inits to optimize (default 40)")
+    ap.add_argument("--restarts", type=int, default=100,
+                    help="number of random inits to optimize (default 100)")
     ap.add_argument("--epochs", type=int, default=400,
                     help="epochs per restart (search phase; retrain finalists "
                     "fully afterwards). Default 400.")
     ap.add_argument("--r-min", type=float, default=0.2)
     ap.add_argument("--r-max", type=float, default=0.98)
+    ap.add_argument("--min-sep", type=float, default=0.1,
+                    help="minimum pairwise sensor spacing (normalized units); "
+                    "rejection-samples spread inits AND adds a hinge repulsion "
+                    "penalty so no layout collapses together. 0 disables.")
+    ap.add_argument("--rep-coef", type=float, default=50.0,
+                    help="weight of the min-sep repulsion penalty (default 50)")
     ap.add_argument("--pos-lr", type=float, default=2e-2)
     ap.add_argument("--lr", type=float, default=1e-3)
     ap.add_argument("--val-frac", type=float, default=0.2)
@@ -131,6 +139,17 @@ def main() -> int:
     ap.add_argument("--pos-dir", default="viz/diffplace/multistart",
                     help="dir for the top-K layout JSONs + summary")
     ap.add_argument("--out", default="viz/diffplace/multistart.png")
+    # auto-train the top-K after the search (single seed, for speed)
+    ap.add_argument("--train-top-k", type=int, default=5,
+                    help="after the search, train the top-K layouts with a "
+                    "SINGLE seed and compare them. 0 = search only.")
+    ap.add_argument("--train-seed", type=int, default=7,
+                    help="the one seed to train each top layout with")
+    ap.add_argument("--config", default="configs/default.yaml")
+    ap.add_argument("--pod-workers", type=int, default=64)
+    ap.add_argument("--outputs", default="outputs")
+    ap.add_argument("--skip-existing", action="store_true",
+                    help="skip training a top tag whose results.json exists")
     args = ap.parse_args()
 
     if not Path(args.basis).is_file():
@@ -154,7 +173,8 @@ def main() -> int:
             Phi, a_np, nx, ny, n=args.n, init="random", param="cartesian",
             r_min=args.r_min, r_max=args.r_max, epochs=args.epochs,
             lr=args.lr, pos_lr=args.pos_lr, val_frac=args.val_frac,
-            seed=args.base_seed + i, device=args.device, verbose=False)
+            seed=args.base_seed + i, device=args.device, verbose=False,
+            min_sep=args.min_sep, rep_coef=args.rep_coef)
         runs.append(res)
         rate = (i + 1) / max(time.time() - t0, 1e-9)
         print(f"  restart {i + 1:3d}/{args.restarts}  "
@@ -202,12 +222,57 @@ def main() -> int:
     _render(runs, args.top_k, Path(args.out), args.r_min, args.r_max,
             args.n, K)
     print(f"  wrote {args.out}")
-    print(f"\nNext: retrain the top layouts properly and confirm on test, e.g.\n"
-          f"  python scripts/train.py --config configs/default.yaml \\\n"
-          f"    --data.npz_dir {args.npz_dir} --pod.k {K} --sensors.n {args.n} "
-          f"--sensors.strategy custom \\\n"
-          f"    --sensors.positions \"$(cat {pos_dir}/top1.json)\" "
-          f"--tag m_multistart_top1")
+
+    tk = min(args.train_top_k, kk)
+    if tk <= 0:
+        print(f"\nNext: retrain a top layout, e.g.\n"
+              f"  python scripts/train.py --config {args.config} "
+              f"--data.npz_dir {args.npz_dir} --pod.k {K} --sensors.n "
+              f"{args.n} --sensors.strategy custom \\\n"
+              f"    --sensors.positions \"$(cat {pos_dir}/top1.json)\" "
+              f"--seeds \"[{args.train_seed}]\" --tag m_multistart_top1")
+        return 0
+
+    # --- auto-train the top-K (single seed) then compare ---
+    print(f"\n===== training top-{tk} (single seed {args.train_seed}) =====",
+          flush=True)
+    trained = []
+    for j in range(1, tk + 1):
+        tag = f"m_multistart_top{j}"
+        rj = Path(args.outputs) / tag / "results.json"
+        if args.skip_existing and rj.is_file():
+            print(f"[skip] {tag}: results.json exists")
+            trained.append((tag, j))
+            continue
+        pos = json.loads((pos_dir / f"top{j}.json").read_text())
+        cmd = [PY, "scripts/train.py", "--config", args.config,
+               "--data.npz_dir", args.npz_dir,
+               "--pod.workers", str(args.pod_workers),
+               "--pod.k", str(K), "--sensors.n", str(args.n),
+               "--sensors.strategy", "custom",
+               "--sensors.positions", json.dumps(pos),
+               "--seeds", json.dumps([args.train_seed]), "--tag", tag]
+        print(f"\n[train] {tag}  pos={json.dumps(pos)}", flush=True)
+        try:
+            subprocess.run(cmd, check=True)
+            trained.append((tag, j))
+        except subprocess.CalledProcessError as e:
+            print(f"  train FAILED for {tag}: {e}", file=sys.stderr)
+
+    ok = [(t, j) for t, j in trained
+          if (Path(args.outputs) / t / "results.json").is_file()]
+    if len(ok) >= 2:
+        cmp_out = str(Path(args.out).with_name("multistart_compare.png"))
+        cmd = [PY, "scripts/compare_placements.py",
+               "--tags", *[t for t, _ in ok],
+               "--labels", *[f"top{j}" for _, j in ok],
+               "--top-n", "20", "--outputs", args.outputs,
+               "--out", cmp_out,
+               "--out-json", str(Path(cmp_out).with_suffix(".json"))]
+        print(f"\n[compare] {' '.join(cmd)}", flush=True)
+        subprocess.run(cmd, check=False)
+    print("\nNote: these top-K models use ONE seed (fast ranking). Retrain the "
+          "final winner with the full seed set for the reported number.")
     return 0
 
 

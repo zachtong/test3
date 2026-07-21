@@ -273,12 +273,32 @@ def _xy_of(pos):
     return np.stack([r * np.cos(th), r * np.sin(th)], axis=-1)
 
 
+def _spread_random_init(rng, n, r_min, r_max, min_sep, tries=300):
+    """Random (r, theta) init whose sensors are pairwise >= min_sep apart in
+    Cartesian space (rejection sampling), so no restart starts collapsed.
+    Returns the best-separated draw if none fully clears min_sep."""
+    best = None
+    for _ in range(tries):
+        r = rng.uniform(r_min, r_max, n)
+        th = rng.uniform(0.0, 90.0, n)
+        xy = np.stack([r * np.cos(np.deg2rad(th)),
+                       r * np.sin(np.deg2rad(th))], axis=1)
+        d = np.sqrt(((xy[:, None] - xy[None]) ** 2).sum(-1))
+        d[np.eye(n, dtype=bool)] = np.inf
+        m = float(d.min())
+        if m >= min_sep:
+            return r, th
+        if best is None or m > best[0]:
+            best = (m, r, th)
+    return best[1], best[2]
+
+
 def run(basis_path, *, traj_path=None, npz_dir=None, K=12, n=6,
         init="abcdef", param="cartesian", r_min=0.2, r_max=0.98,
         epochs=300, lr=1e-3, pos_lr=2e-2, val_frac=0.2, seed=7,
         nt=300, drop_first_steps=1, limit=400, random_subsample=False,
         channels=64, dilations=(1, 2, 4, 8, 16, 32, 64), kernel=3,
-        device=None, verbose=True) -> dict:
+        device=None, verbose=True, min_sep=0.1, rep_coef=50.0) -> dict:
     """Load the data, then optimize once from `init` (see _optimize)."""
     Phi, a_np, (nx, ny) = _load_phi_and_a(
         basis_path, traj_path, npz_dir, K, nt, drop_first_steps,
@@ -287,14 +307,15 @@ def run(basis_path, *, traj_path=None, npz_dir=None, K=12, n=6,
                      r_min=r_min, r_max=r_max, epochs=epochs, lr=lr,
                      pos_lr=pos_lr, val_frac=val_frac, seed=seed,
                      channels=channels, dilations=dilations, kernel=kernel,
-                     device=device, verbose=verbose)
+                     device=device, verbose=verbose, min_sep=min_sep,
+                     rep_coef=rep_coef)
 
 
 def _optimize(Phi, a_np, nx, ny, *, n=6, init="random", param="cartesian",
               r_min=0.2, r_max=0.98, epochs=300, lr=1e-3, pos_lr=2e-2,
               val_frac=0.2, seed=7, channels=64,
               dilations=(1, 2, 4, 8, 16, 32, 64), kernel=3, device=None,
-              verbose=True) -> dict:
+              verbose=True, min_sep=0.1, rep_coef=50.0) -> dict:
     """Gradient-optimize sensor positions on ALREADY-loaded Phi/a. Split out of
     run() so a multi-start driver can load the data ONCE and optimize from many
     random inits cheaply."""
@@ -322,8 +343,7 @@ def _optimize(Phi, a_np, nx, ny, *, n=6, init="random", param="cartesian",
 
     ip = _init_positions(init, n, r_min, r_max)
     if ip is None:
-        r0 = rng.uniform(r_min, r_max, n)
-        th0 = rng.uniform(0, 90, n)
+        r0, th0 = _spread_random_init(rng, n, r_min, r_max, min_sep)
     else:
         r0, th0 = ip
     place = _Placement(r0, th0, param, r_min, r_max, dev)
@@ -368,6 +388,15 @@ def _optimize(Phi, a_np, nx, ny, *, n=6, init="random", param="cartesian",
         opt.zero_grad()
         y = measure(tr_i) / y_std
         loss = F.mse_loss(model(y), a_norm[tr_i])
+        if rep_coef > 0.0 and min_sep > 0.0:
+            # hinge repulsion: penalize only pairs closer than min_sep, so it
+            # prevents sensors collapsing together without biasing spread
+            # layouts (zero penalty once every pair is >= min_sep apart).
+            xy = place.xy()                                # (n, 2)
+            d = torch.cdist(xy, xy)                        # (n, n)
+            iu = torch.triu_indices(n, n, offset=1, device=d.device)
+            loss = loss + rep_coef * torch.relu(
+                min_sep - d[iu[0], iu[1]]).pow(2).sum()
         loss.backward()
         opt.step()
         place.project_()
@@ -635,6 +664,12 @@ def main() -> int:
                     help="learning rate for sensor positions "
                     "(default 2e-2)")
     ap.add_argument("--val-frac", type=float, default=0.2)
+    ap.add_argument("--min-sep", type=float, default=0.1,
+                    help="minimum pairwise sensor spacing (normalized units); "
+                    "a hinge repulsion penalty keeps sensors from collapsing "
+                    "together. 0 disables it.")
+    ap.add_argument("--rep-coef", type=float, default=50.0,
+                    help="weight of the min-sep repulsion penalty (default 50)")
     ap.add_argument("--seed", type=int, default=7)
     ap.add_argument("--nt", type=int, default=300)
     ap.add_argument("--drop-first-steps", type=int, default=1)
@@ -683,7 +718,8 @@ def main() -> int:
               lr=args.lr, pos_lr=args.pos_lr, val_frac=args.val_frac,
               seed=args.seed, nt=args.nt,
               drop_first_steps=args.drop_first_steps, limit=args.limit,
-              random_subsample=args.random_subsample)
+              random_subsample=args.random_subsample,
+              min_sep=args.min_sep, rep_coef=args.rep_coef)
 
     pos_json = _print_summary(res)
     if args.positions_json:

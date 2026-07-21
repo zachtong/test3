@@ -26,6 +26,18 @@ def test_uniform_outer_init_on_outer_ring_spread_in_angle():
     assert np.allclose(th, np.linspace(0, 90, 6))          # 0,18,...,90
 
 
+def test_spread_random_init_respects_min_sep():
+    rng = np.random.default_rng(0)
+    E = np.eye(6, dtype=bool)
+    for _ in range(20):
+        r, th = DP._spread_random_init(rng, 6, 0.2, 0.98, 0.15)
+        xy = np.stack([r * np.cos(np.deg2rad(th)),
+                       r * np.sin(np.deg2rad(th))], axis=1)
+        d = np.sqrt(((xy[:, None] - xy[None]) ** 2).sum(-1))
+        d[E] = np.inf
+        assert d.min() >= 0.15 - 1e-9        # no two sensors start collapsed
+
+
 def test_diag45_init_on_the_diagonal_spread_in_radius():
     r, th = DP._init_positions("diag45", 6, r_min=0.2, r_max=0.98)
     assert np.allclose(th, 45.0)                            # all on 45-deg ray
