@@ -278,15 +278,30 @@ def run(basis_path, *, traj_path=None, npz_dir=None, K=12, n=6,
         epochs=300, lr=1e-3, pos_lr=2e-2, val_frac=0.2, seed=7,
         nt=300, drop_first_steps=1, limit=400, random_subsample=False,
         channels=64, dilations=(1, 2, 4, 8, 16, 32, 64), kernel=3,
-        device=None) -> dict:
+        device=None, verbose=True) -> dict:
+    """Load the data, then optimize once from `init` (see _optimize)."""
+    Phi, a_np, (nx, ny) = _load_phi_and_a(
+        basis_path, traj_path, npz_dir, K, nt, drop_first_steps,
+        limit, random_subsample=random_subsample, seed=seed)
+    return _optimize(Phi, a_np, nx, ny, n=n, init=init, param=param,
+                     r_min=r_min, r_max=r_max, epochs=epochs, lr=lr,
+                     pos_lr=pos_lr, val_frac=val_frac, seed=seed,
+                     channels=channels, dilations=dilations, kernel=kernel,
+                     device=device, verbose=verbose)
+
+
+def _optimize(Phi, a_np, nx, ny, *, n=6, init="random", param="cartesian",
+              r_min=0.2, r_max=0.98, epochs=300, lr=1e-3, pos_lr=2e-2,
+              val_frac=0.2, seed=7, channels=64,
+              dilations=(1, 2, 4, 8, 16, 32, 64), kernel=3, device=None,
+              verbose=True) -> dict:
+    """Gradient-optimize sensor positions on ALREADY-loaded Phi/a. Split out of
+    run() so a multi-start driver can load the data ONCE and optimize from many
+    random inits cheaply."""
     dev = torch.device(device) if device else torch.device(
         "cuda" if torch.cuda.is_available() else "cpu")
     torch.manual_seed(seed)
     rng = np.random.default_rng(seed)
-
-    Phi, a_np, (nx, ny) = _load_phi_and_a(
-        basis_path, traj_path, npz_dir, K, nt, drop_first_steps,
-        limit, random_subsample=random_subsample, seed=seed)
     K = Phi.shape[1]
     n_sim, _, Nt = a_np.shape
 
@@ -370,8 +385,9 @@ def run(basis_path, *, traj_path=None, npz_dir=None, K=12, n=6,
             val_hist.append((ep + 1, float(loss.detach()), vloss))
             if vloss < best_val:
                 best_val, best_pos = vloss, cur.copy()
-            print(f"  ep {ep + 1:4d}  train {float(loss.detach()):.4e}  "
-                  f"val {vloss:.4e}", flush=True)
+            if verbose:
+                print(f"  ep {ep + 1:4d}  train {float(loss.detach()):.4e}  "
+                      f"val {vloss:.4e}", flush=True)
 
     final_pos = place.rtheta()
     fxy, ixy = _xy_of(final_pos), _xy_of(init_pos)
