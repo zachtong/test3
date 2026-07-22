@@ -161,13 +161,14 @@ def _render(runs, distinct, top_k, out_path, r_min, r_max, n, K):
     for rb in (r_min, r_max):
         axp.plot(rb * np.cos(np.deg2rad(th)), rb * np.sin(np.deg2rad(th)),
                  color="#2a9d8f", lw=1, alpha=0.6)
-    cmap = plt.cm.autumn(np.linspace(0, 0.75, kk))
+    markers = ["o", "s", "^", "D", "v", "P", "*", "X", "<", ">"]
     for j in range(kk):
         p = np.asarray(runs[distinct[j]]["best_pos"])
         x = p[:, 0] * np.cos(np.deg2rad(p[:, 1]))
         y = p[:, 0] * np.sin(np.deg2rad(p[:, 1]))
-        axp.scatter(x, y, s=110 - 12 * j, color=cmap[j], edgecolor="black",
-                    linewidth=0.6, alpha=0.9, zorder=6 - j,
+        axp.scatter(x, y, s=130, marker=markers[j % len(markers)],
+                    facecolor=plt.cm.tab10(j % 10), edgecolor="black",
+                    linewidth=0.7, alpha=0.9, zorder=6,
                     label=f"#{j + 1}  {vals[distinct[j]]:.3e}")
     axp.set_xlim(-0.08, 1.15)
     axp.set_ylim(-0.08, 1.15)
@@ -308,6 +309,7 @@ def main() -> int:
     (pos_dir / "summary.json").write_text(json.dumps(dict(
         restarts=len(runs), distinct=len(distinct), K=int(K), n=int(args.n),
         best_val=float(vals.min()), rel_spread=float(rel),
+        r_min=float(args.r_min), r_max=float(args.r_max),
         top=[dict(rank=j + 1, val=float(vals[distinct[j]]),
                   positions=_round_pos(runs[distinct[j]]["best_pos"]))
              for j in range(kk)]), indent=2))
@@ -316,6 +318,14 @@ def main() -> int:
     _render(runs, distinct, args.top_k, Path(args.out), args.r_min,
             args.r_max, args.n, K)
     print(f"  wrote {args.out}")
+    # a horizontal one-panel-per-config figure (clearer than the overlay)
+    from scripts.plot_multistart_configs import plot_row
+    top_cfgs = [dict(rank=j + 1, val=float(vals[distinct[j]]),
+                     pos=np.asarray(runs[distinct[j]]["best_pos"], float))
+                for j in range(kk)]
+    row_out = Path(args.out).with_name("multistart_configs_row.png")
+    plot_row(top_cfgs, args.r_min, args.r_max, row_out, args.n, K)
+    print(f"  wrote {row_out}")
 
     tk = min(args.train_top_k, kk)
     if tk <= 0:
