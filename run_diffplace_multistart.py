@@ -187,7 +187,14 @@ def _render(runs, distinct, top_k, out_path, r_min, r_max, n, K):
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument("--basis", required=True)
+    ap.add_argument("--basis", default=None,
+                    help="pod3d_*.npz basis (required unless --train-only)")
+    ap.add_argument("--train-only", action="store_true",
+                    help="skip the search entirely; read the already-exported "
+                    "top-K layouts from --pos-dir (top{1..K}.json + "
+                    "summary.json) and go straight to training + comparison. "
+                    "Use after an interrupted run -- the search results are "
+                    "already on disk.")
     ap.add_argument("--traj", default=None)
     ap.add_argument("--npz-dir", default=None,
                     help="dataset dir (no default; pass it, or use --traj)")
@@ -237,7 +244,31 @@ def main() -> int:
     ap.add_argument("--skip-existing", action="store_true")
     args = ap.parse_args()
 
-    if not Path(args.basis).is_file():
+    if args.train_only:
+        pos_dir = Path(args.pos_dir)
+        summ = pos_dir / "summary.json"
+        if not summ.is_file():
+            print(f"--train-only but no {summ}; run the search first",
+                  file=sys.stderr)
+            return 2
+        if not args.npz_dir:
+            print("--train-only still needs --npz-dir (training reads the "
+                  "dataset)", file=sys.stderr)
+            return 2
+        d = json.loads(summ.read_text())
+        K = int(d.get("K", args.K))
+        kk = 0
+        while (pos_dir / f"top{kk + 1}.json").is_file():
+            kk += 1
+        if kk == 0:
+            print(f"--train-only but no top*.json in {pos_dir}",
+                  file=sys.stderr)
+            return 2
+        print(f"train-only: {kk} exported layouts in {pos_dir} (K={K})")
+        _train_topk_and_compare(args, pos_dir, K, kk)
+        return 0
+
+    if not args.basis or not Path(args.basis).is_file():
         print(f"basis not found: {args.basis}", file=sys.stderr)
         return 2
 
@@ -327,6 +358,16 @@ def main() -> int:
     plot_row(top_cfgs, args.r_min, args.r_max, row_out, args.n, K)
     print(f"  wrote {row_out}")
 
+    _train_topk_and_compare(args, pos_dir, K, kk)
+    print("\nNote: these top-K models use ONE seed (fast ranking). Retrain the "
+          "final winner with the full seed set for the reported number.")
+    return 0
+
+
+def _train_topk_and_compare(args, pos_dir, K, kk) -> None:
+    """Train the top-K layouts (single seed) via scripts/train.py, then run
+    the comparison. Reads pos_dir/top{j}.json -- callable without the search
+    (--train-only)."""
     tk = min(args.train_top_k, kk)
     if tk <= 0:
         print(f"\nNext: retrain a top layout, e.g.\n  python scripts/train.py "
@@ -334,7 +375,7 @@ def main() -> int:
               f"--pod.k {K} --sensors.n {args.n} --sensors.strategy custom \\\n"
               f"    --sensors.positions \"$(cat {pos_dir}/top1.json)\" "
               f"--seeds \"[{args.train_seed}]\" --tag m_multistart_top1")
-        return 0
+        return
 
     print(f"\n===== training top-{tk} (single seed {args.train_seed}) =====",
           flush=True)
@@ -373,9 +414,6 @@ def main() -> int:
                "--out-json", str(Path(cmp_out).with_suffix(".json"))]
         print(f"\n[compare] {' '.join(cmd)}", flush=True)
         subprocess.run(cmd, check=False)
-    print("\nNote: these top-K models use ONE seed (fast ranking). Retrain the "
-          "final winner with the full seed set for the reported number.")
-    return 0
 
 
 if __name__ == "__main__":
