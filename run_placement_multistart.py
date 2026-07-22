@@ -26,7 +26,6 @@ from pathlib import Path
 import numpy as np
 
 PY = sys.executable
-_NPZ_DEFAULT = "/data/3D_wafer_bonding/sim_dataset_big_firehorse_1_and_2/"
 
 
 def _round_pos(pos) -> list:
@@ -100,8 +99,9 @@ def _build_plan(args):
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument("--npz-dir", default=_NPZ_DEFAULT,
-                    help="merged dataset dir (default: firehorse_1_and_2)")
+    ap.add_argument("--npz-dir", required=True,
+                    help="merged dataset dir (REQUIRED -- no default; pass the "
+                    "correct path explicitly)")
     ap.add_argument("--config", default="configs/default.yaml")
     ap.add_argument("--pod-k", type=int, default=12)
     ap.add_argument("--pod-workers", type=int, default=64)

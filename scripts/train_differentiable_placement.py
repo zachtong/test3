@@ -638,11 +638,9 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--basis", default=None)
     ap.add_argument("--traj", default=None)
-    ap.add_argument(
-        "--npz-dir",
-        default="/data/3D_wafer_bonding/sim_dataset_big_firehorse_1_and_2/",
-        help="dataset to project onto the basis (used unless --traj is "
-        "given); defaults to the firehorse_1_and_2 merged set")
+    ap.add_argument("--npz-dir", default=None,
+                    help="dataset to project onto the basis (no default; pass "
+                    "it explicitly, or use --traj instead)")
     ap.add_argument("--K", type=int, default=12)
     ap.add_argument("--n", type=int, default=6)
     ap.add_argument("--init", default="abcdef",

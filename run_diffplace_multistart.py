@@ -41,7 +41,6 @@ from scripts.train_differentiable_placement import (        # noqa: E402
     _load_phi_and_a, _optimize)
 
 PY = sys.executable
-_NPZ_DEFAULT = "/data/3D_wafer_bonding/sim_dataset_big_firehorse_1_and_2/"
 
 
 def _round_pos(pos) -> list:
@@ -189,7 +188,8 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--basis", required=True)
     ap.add_argument("--traj", default=None)
-    ap.add_argument("--npz-dir", default=_NPZ_DEFAULT)
+    ap.add_argument("--npz-dir", default=None,
+                    help="dataset dir (no default; pass it, or use --traj)")
     ap.add_argument("--K", type=int, default=12)
     ap.add_argument("--n", type=int, default=6)
     ap.add_argument("--nt", type=int, default=300)
