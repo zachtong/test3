@@ -183,6 +183,85 @@ def _render(records, out_path, top_n):
     plt.close(fig)
 
 
+def _render_configs_row(records, out_path):
+    """One quarter-disk panel per config, in a horizontal row, so every
+    layout reads cleanly on its own (the overlay gets crowded at 6)."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    m = len(records)
+    cols = _colors(m)
+    markers = ["o", "s", "^", "D", "v", "P", "*", "X", "<", ">"]
+    fig, axes = plt.subplots(1, m, figsize=(3.2 * m, 3.8),
+                             constrained_layout=True)
+    if m == 1:
+        axes = [axes]
+    th = np.linspace(0, 90, 200)
+    for j, (ax, r) in enumerate(zip(axes, records)):
+        ax.plot(np.cos(np.deg2rad(th)), np.sin(np.deg2rad(th)),
+                color="0.35", lw=1.8)
+        ax.plot([0, 1.02], [0, 0], color="0.75", lw=0.8)
+        ax.plot([0, 0], [0, 1.02], color="0.75", lw=0.8)
+        p = r["positions"]
+        if len(p):
+            x = p[:, 0] * np.cos(np.deg2rad(p[:, 1]))
+            y = p[:, 0] * np.sin(np.deg2rad(p[:, 1]))
+            for xi, yi in zip(x, y):
+                ax.plot([0, xi], [0, yi], color="0.88", lw=0.8, zorder=1)
+            ax.scatter(x, y, s=120, marker=markers[j % len(markers)],
+                       facecolor=cols[j], edgecolor="black", linewidth=0.7,
+                       zorder=5)
+        ax.set_xlim(-0.06, 1.1)
+        ax.set_ylim(-0.06, 1.1)
+        ax.set_aspect("equal")
+        ax.set_xticks([])
+        ax.set_yticks([])
+        ax.set_title(f"{r['label']}\nwN={r['wn'] * 100:.3f}%", fontsize=10)
+    fig.suptitle("sensor configuration per model", fontweight="bold")
+    Path(out_path).parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(str(out_path), dpi=150, bbox_inches="tight")
+    plt.close(fig)
+
+
+def _render_metrics(records, out_path, top_n):
+    """Three bar panels -- median, p95, worst-N -- one bar per config, so the
+    verdict is visible on every statistic, not only the worst-case tail."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    cols = _colors(len(records))
+    labels = [r["label"] for r in records]
+    metrics = [("median", "median field error (%)",
+                [(r["median"] or 0.0) * 100 for r in records]),
+               ("p95", "p95 field error (%)",
+                [(r["p95"] or 0.0) * 100 for r in records]),
+               (f"worst-{top_n}", f"worst-{top_n} mean field error (%)",
+                [r["wn"] * 100 for r in records])]
+    fig, axes = plt.subplots(1, 3, figsize=(15, 4.6),
+                             constrained_layout=True)
+    yy = np.arange(len(records))
+    for ax, (name, xlabel, vals) in zip(axes, metrics):
+        vals = np.asarray(vals)
+        ax.barh(yy, vals, color=cols, edgecolor="black", linewidth=0.6)
+        for i, v in enumerate(vals):
+            ax.text(v, yy[i], f" {v:.3f}", va="center", fontsize=8)
+        ax.set_yticks(yy)
+        ax.set_yticklabels(labels, fontsize=9)
+        ax.invert_yaxis()
+        ax.set_xlabel(xlabel)
+        spread = float(vals.max() - vals.min())
+        rel = spread / max(float(vals.mean()), 1e-30)
+        ax.set_title(f"{name}  (spread {spread:.3f}%, "
+                     f"{rel * 100:.0f}% of mean)", fontsize=10)
+        ax.grid(axis="x", alpha=0.3)
+    fig.suptitle("placement comparison across statistics", fontweight="bold")
+    Path(out_path).parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(str(out_path), dpi=150, bbox_inches="tight")
+    plt.close(fig)
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--tags", nargs="+", required=True,
@@ -224,8 +303,13 @@ def main() -> int:
 
     _table(records, args.top_n, args.k_gap)
     if args.out:
-        _render(records, Path(args.out), args.top_n)
-        print(f"\nwrote {args.out}")
+        out = Path(args.out)
+        _render(records, out, args.top_n)
+        cfg_out = out.with_name(out.stem + "_configs" + out.suffix)
+        _render_configs_row(records, cfg_out)
+        met_out = out.with_name(out.stem + "_metrics" + out.suffix)
+        _render_metrics(records, met_out, args.top_n)
+        print(f"\nwrote {out}\nwrote {cfg_out}\nwrote {met_out}")
     if args.out_json:
         wn = np.array([r["wn"] for r in records])
         summary = dict(

@@ -7,8 +7,9 @@ via scripts/train.py (positions passed as a single subprocess argv element, so
 no shell quoting can mangle the [ ] brackets), and finally runs
 scripts/compare_placements.py over every model that has a results.json.
 
-  init sets   : outer-uniform + diag-45 built to match the diffplace presets;
-                ABCDEF init reuses the existing trained sweep model.
+  init sets   : outer-uniform + diag-45 + ABCDEF, all built in-driver and
+                trained FRESH with the same recipe on the same --npz-dir, so
+                the comparison never mixes datasets.
   optimized   : read straight from each diffplace --save-history npz (best_pos).
 
 Already-trained tags are skipped with --skip-existing, so a second run only
@@ -82,9 +83,14 @@ def _train(tag, positions, args) -> bool:
         return False
 
 
+_ABCDEF = [[0.52, 0.0], [0.52, 45.0], [0.52, 90.0],
+           [0.847, 0.0], [0.847, 45.0], [0.847, 90.0]]
+
+
 def _build_plan(args):
     """(tag, label, kind, src). kind: 'init' src=positions list; 'opt'
-    src=hist npz path; 'existing' src=None (already trained, compare only)."""
+    src=hist npz path. ALL SIX are trained fresh with the same recipe on the
+    same --npz-dir, so the comparison never mixes datasets."""
     return [
         (args.tag_uniform_init, "init-uniform", "init",
          _init_uniform(args.n, args.r_max)),
@@ -92,7 +98,8 @@ def _build_plan(args):
         (args.tag_diag45_init, "init-45", "init",
          _init_diag45(args.n, args.r_min, args.r_max)),
         (args.tag_diag45_opt, "opt-45", "opt", args.diag45_hist),
-        (args.abcdef_tag, "ABCDEF", "existing", None),
+        (args.tag_abcdef_init, "init-ABCDEF", "init",
+         [list(p) for p in _ABCDEF[:args.n]]),
         (args.tag_abcdef_opt, "opt-ABCDEF", "opt", args.abcdef_hist),
     ]
 
@@ -121,8 +128,9 @@ def main() -> int:
     ap.add_argument("--tag-uniform-opt", default="m_optUniform")
     ap.add_argument("--tag-diag45-init", default="m_initDiag45")
     ap.add_argument("--tag-diag45-opt", default="m_optDiag45")
-    ap.add_argument("--abcdef-tag", default="merged_sweep_k12_n6_ABCDEF",
-                    help="existing trained ABCDEF-init model (compare only)")
+    ap.add_argument("--tag-abcdef-init", default="m_initABCDEF",
+                    help="ABCDEF-init model, trained FRESH like the others so "
+                    "all six share dataset + recipe")
     ap.add_argument("--tag-abcdef-opt", default="m_optABCDEF_cart")
     ap.add_argument("--skip-existing", action="store_true",
                     help="skip a tag whose outputs/<tag>/results.json exists")
@@ -143,9 +151,6 @@ def main() -> int:
     status = {}
     for tag, label, kind, src in _build_plan(args):
         rj = outputs / tag / "results.json"
-        if kind == "existing":
-            status[tag] = "existing" if rj.is_file() else "MISSING results.json"
-            continue
         positions = src if kind == "init" else _optimized_from_hist(src)
         if positions is None:
             status[tag] = "skipped (no history)"
