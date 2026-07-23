@@ -1,0 +1,30 @@
+# 3D real-experiment channel config: the six directional sensors, mapped onto
+# the model's quarter-disk (r, theta). Unlike the 2D axisymmetric pipeline, NO
+# azimuthal averaging -- each (r, theta) is a DISTINCT input channel.
+#
+# The physical azimuths (X=180, Y=90, D=-45 deg) are given here verbatim; the
+# adapter folds them into the quarter [0, 90] by the wafer's mirror symmetry
+# about the x and y axes (X=180->0, Y=90->90, D=-45->45), so the six sensors
+# land 1:1 on the model's ABCDEF positions. r_phys is in metres and is
+# normalized by R.
+R: 0.15
+time_key: time
+
+channels:
+  - { key: w_XM, r_phys: 0.078, theta_deg: 180 }   # X inner -> (r=0.520, theta=0)
+  - { key: w_DM, r_phys: 0.078, theta_deg: -45 }   # D inner -> (r=0.520, theta=45)
+  - { key: w_YM, r_phys: 0.078, theta_deg: 90 }    # Y inner -> (r=0.520, theta=90)
+  - { key: w_XE, r_phys: 0.127, theta_deg: 180 }   # X edge  -> (r=0.847, theta=0)
+  - { key: w_DE, r_phys: 0.127, theta_deg: -45 }   # D edge  -> (r=0.847, theta=45)
+  - { key: w_YE, r_phys: 0.127, theta_deg: 90 }    # Y edge  -> (r=0.847, theta=90)
+
+# Truncation window around the bonding event. t_cutoff is TENTATIVE -- set it to
+# where the sensor traces flatten at bonding completion (the static tail would
+# otherwise distort the per-run time normalization).
+t_start: 0.0
+t_cutoff: 13.0
+
+# sign: multiply displacement (use -1.0 if the rig reports downward as POSITIVE;
+# the model expects downward = negative, matching the simulation convention).
+sign: 1.0
+zero_baseline: false
