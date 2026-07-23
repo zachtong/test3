@@ -118,5 +118,40 @@ def test_eval_real_end_to_end(bundle_and_real, tmp_path):
         assert (out / f).is_file() and (out / f).stat().st_size > 0, f
     s = json.loads((out / "summary.json").read_text())
     assert s["w_shape"] == [24, 24, 20]
+    assert s["input_kind"] == "NPZ"
     crit = [c for c in s["checkpoint1"] if c["severity"] == "critical"]
     assert all(c["ok"] for c in crit)                    # critical checks pass
+
+
+_CSV = """\
+Zero position[nm]
+,XM,XE,YM,YE,DM,DE
+,10,20,10,20,10,20
+Sampling Data[nm]
+Time[ms],XM,XE,YM,YE,DM,DE
+0,-100,-200,-110,-210,-105,-205
+1000,-150,-250,-160,-260,-155,-255
+2000,-200,-300,-210,-310,-205,-305
+"""
+
+
+def test_eval_real_ingests_csv_and_clamps_window(bundle_and_real, tmp_path):
+    import subprocess
+    bp, _ = bundle_and_real
+    csv = tmp_path / "run.csv"
+    csv.write_text(_CSV)
+    out = tmp_path / "eval_csv"
+    # config t_cutoff=13 s but the CSV only spans 0..2 s -> must clamp, not fail
+    r = subprocess.run(
+        [sys.executable, "scripts/eval_real.py", "--bundle", str(bp),
+         "--real", str(csv), "--config",
+         str(_root / "configs" / "real_exp_n6.yaml"), "--out-dir", str(out)],
+        cwd=str(_root), capture_output=True, text=True)
+    assert r.returncode in (0, 1), r.stderr[-800:]
+    assert "clamped to data range" in r.stdout
+    s = json.loads((out / "summary.json").read_text())
+    assert s["input_kind"] == "CSV"
+    assert s["window_s"][1] <= 2.0 + 1e-9                # clamped to data max
+    assert s["w_shape"] == [24, 24, 20]
+    crit = [c for c in s["checkpoint1"] if c["severity"] == "critical"]
+    assert all(c["ok"] for c in crit)
