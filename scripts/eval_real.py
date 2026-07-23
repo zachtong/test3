@@ -164,99 +164,157 @@ def _viz_raw_overview(raw, cfg, out_path):
 def _frame_idx(nt, max_frames):
     if nt <= max_frames:
         return np.arange(nt)
-    return np.linspace(0, nt - 1, max_frames).astype(int)
+    return np.unique(np.linspace(0, nt - 1, max_frames).astype(int))
 
 
-def _disp_norm(vlo, vhi):
-    """A DATA-DRIVEN color norm for the (downward) displacement -- never forced
-    symmetric about 0. If the field is essentially one-signed negative, the
-    colorbar spans [vlo, 0] (sequential); if there is a real positive rebound
-    (gas-bulge), a diverging norm keeps 0 = neutral with ASYMMETRIC extents so
-    the small rebound shows without wasting half the bar."""
-    import matplotlib.colors as mcolors
-    if vlo < 0 and vhi > 0.02 * abs(vlo):
-        return mcolors.TwoSlopeNorm(vcenter=0.0, vmin=vlo, vmax=vhi), "coolwarm"
-    hi = min(vhi, 0.0)
-    if not (hi > vlo):
-        hi = vlo + 1e-12
-    return mcolors.Normalize(vmin=vlo, vmax=hi), "Blues_r"
+def _disp_scale(w, inq):
+    """Data-driven z range for the (downward) displacement, in microns. NOT
+    symmetric about 0: z_low is the deepest descent (robust min), z_high is
+    anchored at 0 (undisplaced) unless a real positive rebound (gas-bulge)
+    pushes it above. The WAFER_CMAP then maps z_low -> purple, z_high -> yellow.
+    Returns (z_low, z_high)."""
+    v = (w[inq, :].ravel() * _UM)
+    v = v[np.isfinite(v)]
+    if not v.size:
+        return -1.0, 0.0
+    z_low = float(np.percentile(v, 0.5))
+    z_high = max(float(np.percentile(v, 99.5)), 0.0)
+    if not (z_high > z_low):
+        z_high = z_low + 1e-9
+    return z_low, z_high
 
 
-def _draw_disk(ax, sensor_xy):
-    circ = np.linspace(0, 2 * np.pi, 200)
-    ax.plot(np.cos(circ), np.sin(circ), color="0.3", lw=1.5)
-    ax.scatter(sensor_xy[:, 0], sensor_xy[:, 1], s=70, marker="o",
-               facecolor="none", edgecolor="black", linewidth=1.4, zorder=5)
-    ax.set_aspect("equal")
-    ax.set_xlabel("x / R")
-    ax.set_ylabel("y / R")
+def _peak_t(w, inq) -> int:
+    mag = np.array([np.abs(w[:, :, k][inq]).mean() for k in range(w.shape[2])])
+    return int(np.argmax(mag))
 
 
-def _render_field(w, x, y, sensor_xy, out_dir, *, anim=True, fps=12,
-                  max_frames=60):
-    """Top-down full-disk displacement: a static snapshot at the peak time and
-    (optionally) a GIF over time, both on ONE fixed, data-driven color scale
-    (so the animation shows the real descent, not per-frame renormalization)."""
+def _render_topdown(w, x, y, sensor_xy, out_dir, z_low, z_high, fps,
+                    max_frames):
+    """Top-down full-disk displacement animation (WAFER_CMAP, fixed z range
+    across all frames)."""
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
+    from matplotlib.animation import FuncAnimation, PillowWriter
+    from matplotlib.colors import Normalize
+    from evaluation.palette import WAFER_CMAP
 
-    wf, xf, yf = _mirror_full(w, x, y)                     # (Xf, Yf, nt)
+    wf, xf, yf = _mirror_full(w, x, y)
     nt = w.shape[2]
-    Xq, Yq = np.meshgrid(x, y, indexing="ij")
-    inq = Xq * Xq + Yq * Yq <= 1.0
-    finite = (w[inq, :].ravel() * _UM)
-    finite = finite[np.isfinite(finite)]
-    vlo = float(np.percentile(finite, 1)) if finite.size else -1.0
-    vhi = float(np.percentile(finite, 99)) if finite.size else 0.0
-    norm, cmap = _disp_norm(vlo, vhi)
-
     Xf, Yf = np.meshgrid(xf, yf, indexing="ij")
     outside = (Xf * Xf + Yf * Yf) > 1.0
     ext = [xf[0], xf[-1], yf[0], yf[-1]]
+    norm = Normalize(vmin=z_low, vmax=z_high)
 
     def slab(ti):
         s = (wf[:, :, ti] * _UM).copy()
         s[outside] = np.nan
         return s.T                                        # imshow wants [y, x]
 
-    mag_t = np.array([np.abs(w[:, :, k][inq]).mean() for k in range(nt)])
-    ts = int(np.argmax(mag_t))
-
-    out_dir = Path(out_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
-    fig, ax = plt.subplots(figsize=(6.6, 6.0), constrained_layout=True)
-    im = ax.imshow(slab(ts), origin="lower", extent=ext, cmap=cmap, norm=norm,
-                   interpolation="nearest")
-    _draw_disk(ax, sensor_xy)
-    ax.set_title(f"reconstructed u_z (um), full disk, peak t*={ts}/{nt - 1}")
+    frames = _frame_idx(nt, max_frames)
+    fig, ax = plt.subplots(figsize=(6.6, 6.2), constrained_layout=True)
+    im = ax.imshow(slab(int(frames[0])), origin="lower", extent=ext,
+                   cmap=WAFER_CMAP, norm=norm, interpolation="nearest")
+    circ = np.linspace(0, 2 * np.pi, 200)
+    ax.plot(np.cos(circ), np.sin(circ), color="0.3", lw=1.4)
+    ax.scatter(sensor_xy[:, 0], sensor_xy[:, 1], s=60, facecolor="none",
+               edgecolor="k", linewidth=1.3, zorder=5)
+    ax.set_aspect("equal")
+    ax.set_xlabel("x / R")
+    ax.set_ylabel("y / R")
     fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04, label="u_z (um)")
-    fig.savefig(str(out_dir / "real_field.png"), dpi=140, bbox_inches="tight")
+
+    def _upd(fi):
+        ti = int(frames[fi])
+        im.set_data(slab(ti))
+        ax.set_title(f"top-down u_z (um)   t={ti / (nt - 1):.2f}   "
+                     f"({ti}/{nt - 1})")
+        return [im]
+
+    gif = Path(out_dir) / "real_field_topdown.gif"
+    print(f"rendering {len(frames)}-frame top-down GIF -> {gif}", flush=True)
+    FuncAnimation(fig, _upd, frames=len(frames), interval=1000 // fps,
+                  blit=False).save(str(gif), writer=PillowWriter(fps=fps),
+                                   dpi=100)
     plt.close(fig)
 
-    if anim:
-        from matplotlib.animation import FuncAnimation, PillowWriter
-        frames = _frame_idx(nt, max_frames)
-        fig, ax = plt.subplots(figsize=(6.6, 6.4), constrained_layout=True)
-        im = ax.imshow(slab(int(frames[0])), origin="lower", extent=ext,
-                       cmap=cmap, norm=norm, interpolation="nearest")
-        _draw_disk(ax, sensor_xy)
-        fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04, label="u_z (um)")
 
-        def _upd(fi):
-            ti = int(frames[fi])
-            im.set_data(slab(ti))
-            ax.set_title(f"reconstructed u_z (um)   t={ti / (nt - 1):.2f}   "
-                         f"({ti}/{nt - 1})")
-            return [im]
+def _render_3d(w, x, y, sensor_xy, sensor_ij, out_dir, z_low, z_high, ts, fps,
+               max_frames, elev=22, azim=-60, mesh=64):
+    """3D animation: the upper wafer descends over time onto the LOWER wafer
+    (the peak/final-descent field, a fixed floor -- the 'peak snapshot'), on
+    WAFER_CMAP with a fixed z range. Sensor markers are posts on the upper
+    surface. Mirrors the quarter to the full disk."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from matplotlib.animation import FuncAnimation, PillowWriter
+    from mpl_toolkits.mplot3d import Axes3D                # noqa: F401
+    from evaluation.palette import WAFER_CMAP, sensor_color
 
-        gif = out_dir / "real_field_anim.gif"
-        print(f"rendering {len(frames)}-frame field GIF -> {gif}", flush=True)
-        FuncAnimation(fig, _upd, frames=len(frames), interval=1000 // fps,
-                      blit=False).save(str(gif), writer=PillowWriter(fps=fps),
-                                       dpi=100)
-        plt.close(fig)
-    return ts, vlo, vhi
+    wf, xf, yf = _mirror_full(w, x, y)
+    nt = w.shape[2]
+    m = wf.shape[0]
+    xi = np.arange(0, m, max(1, m // mesh))
+    wf_d = wf[np.ix_(xi, xi)]                              # (md, md, nt)
+    Xd, Yd = np.meshgrid(xf[xi], yf[xi], indexing="ij")
+    outside = (Xd * Xd + Yd * Yd) > 1.0
+
+    def surf(ti):
+        Z = (wf_d[:, :, ti] * _UM).copy()
+        Z[outside] = np.nan
+        return Z
+
+    lower = surf(ts)                                       # peak = lower wafer
+    frames = _frame_idx(nt, max_frames)
+    post = max(0.04 * abs(z_low), 0.5)
+    sxy = np.asarray(sensor_xy, float)
+    sij = np.asarray(sensor_ij, int)
+
+    fig = plt.figure(figsize=(7.0, 6.6))
+    ax = fig.add_subplot(111, projection="3d")
+
+    def _draw(fi):
+        ti = int(frames[fi])
+        ax.clear()
+        ax.plot_surface(Xd, Yd, lower, cmap=WAFER_CMAP, vmin=z_low, vmax=z_high,
+                        alpha=0.5, linewidth=0, antialiased=False,
+                        rstride=1, cstride=1)
+        ax.plot_surface(Xd, Yd, surf(ti), cmap=WAFER_CMAP, vmin=z_low,
+                        vmax=z_high, alpha=0.95, linewidth=0,
+                        antialiased=False, rstride=1, cstride=1)
+        for k in range(len(sxy)):
+            zc = float(w[sij[k, 0], sij[k, 1], ti]) * _UM
+            ax.plot([sxy[k, 0]] * 2, [sxy[k, 1]] * 2, [zc, zc + post],
+                    color="0.25", lw=0.9, zorder=10)
+            ax.plot([sxy[k, 0]], [sxy[k, 1]], [zc + post], "o",
+                    color=sensor_color(k), markersize=7, markeredgecolor="k",
+                    markeredgewidth=0.8, zorder=11)
+        ax.set_zlim(z_low, z_high)
+        try:
+            ax.set_box_aspect((1.0, 1.0, 0.45), zoom=1.05)
+        except TypeError:
+            ax.set_box_aspect((1.0, 1.0, 0.45))
+        except Exception:                                  # noqa: BLE001
+            pass
+        ax.view_init(elev=elev, azim=azim)
+        for a in (ax.xaxis, ax.yaxis, ax.zaxis):
+            a.pane.fill = False
+            a.set_tick_params(labelsize=7, colors="0.45")
+        ax.set_xlabel("x / R")
+        ax.set_ylabel("y / R")
+        ax.set_zlabel("u_z (um)")
+        ax.set_title(f"upper wafer descending onto lower (peak)   "
+                     f"t={ti / (nt - 1):.2f}", fontsize=10)
+        return []
+
+    gif = Path(out_dir) / "real_field_3d.gif"
+    print(f"rendering {len(frames)}-frame 3D GIF -> {gif}", flush=True)
+    FuncAnimation(fig, _draw, frames=len(frames), interval=1000 // fps,
+                  blit=False).save(str(gif), writer=PillowWriter(fps=fps),
+                                   dpi=100)
+    plt.close(fig)
 
 
 def main() -> int:
@@ -274,10 +332,14 @@ def main() -> int:
                     "traces flatten at bonding completion")
     ap.add_argument("--out-dir", default="viz/real_eval")
     ap.add_argument("--no-anim", action="store_true",
-                    help="skip the field-over-time GIF (snapshot only)")
+                    help="skip the field animations (top-down + 3D GIFs)")
     ap.add_argument("--anim-fps", type=int, default=12)
-    ap.add_argument("--anim-frames", type=int, default=60,
-                    help="max frames in the field GIF (default 60)")
+    ap.add_argument("--anim-frames", type=int, default=40,
+                    help="max frames per field GIF (default 40)")
+    ap.add_argument("--elev", type=float, default=22.0,
+                    help="3D view elevation angle (deg)")
+    ap.add_argument("--azim", type=float, default=-60.0,
+                    help="3D view azimuth angle (deg)")
     args = ap.parse_args()
 
     bundle = load_bundle(args.bundle)
@@ -306,9 +368,21 @@ def main() -> int:
     x_canon = np.asarray(bundle["x_canon"])
     y_canon = np.asarray(bundle["y_canon"])
     sensor_xy = np.asarray(bundle["sensor_xy"], dtype=float)
-    ts, vlo, vhi = _render_field(
-        w, x_canon, y_canon, sensor_xy, out_dir, anim=not args.no_anim,
-        fps=args.anim_fps, max_frames=args.anim_frames)
+    sensor_ij = np.asarray(bundle["sensor_ij"], dtype=int)
+    Xq, Yq = np.meshgrid(x_canon, y_canon, indexing="ij")
+    inq = Xq * Xq + Yq * Yq <= 1.0
+    z_low, z_high = _disp_scale(w, inq)         # fixed, data-driven, negative
+    ts = _peak_t(w, inq)
+    made = []
+    if not args.no_anim:
+        _render_topdown(w, x_canon, y_canon, sensor_xy, out_dir, z_low, z_high,
+                        args.anim_fps, args.anim_frames)
+        made.append("real_field_topdown.gif")
+        _render_3d(w, x_canon, y_canon, sensor_xy, sensor_ij, out_dir, z_low,
+                   z_high, ts, args.anim_fps, args.anim_frames,
+                   elev=args.elev, azim=args.azim)
+        made.append("real_field_3d.gif")
+
     np.savez(out_dir / "field.npz", w=w, x=x_canon, y=y_canon,
              t=np.linspace(0.0, 1.0, int(bundle["nt"])))
     (out_dir / "summary.json").write_text(json.dumps(dict(
@@ -316,13 +390,12 @@ def main() -> int:
         time_range_s=[float(t.min()), float(t.max())],
         window_s=[float(cfg.t_start), float(cfg.t_cutoff)],
         y_shape=list(y.shape), w_shape=list(w.shape), peak_t=ts,
-        field_range_um=[vlo, vhi],
+        field_range_um=[z_low, z_high],
         checkpoint1=[dict(name=n, severity=s, ok=bool(o), detail=d)
                      for n, s, o, d in checks],
         checkpoint1_pass=bool(ok)), indent=2))
-    figs = "real_inputs.png, real_field.png"
-    figs += ", real_field_anim.gif" if not args.no_anim else ""
-    print(f"\nwrote {figs}, field.npz, summary.json to {out_dir}/")
+    print(f"\nwrote {', '.join(['real_inputs.png'] + made)}, field.npz, "
+          f"summary.json to {out_dir}/")
     return 0 if ok else 1
 
 
