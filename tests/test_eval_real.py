@@ -114,13 +114,28 @@ def test_eval_real_end_to_end(bundle_and_real, tmp_path):
          str(_root / "configs" / "real_exp_n6.yaml"), "--out-dir", str(out)],
         cwd=str(_root), capture_output=True, text=True)
     assert r.returncode in (0, 1), r.stderr[-800:]      # 1 only if a WARN-crit
-    for f in ["real_inputs.png", "real_field.png", "field.npz", "summary.json"]:
+    for f in ["real_inputs.png", "real_field.png", "real_field_anim.gif",
+              "field.npz", "summary.json"]:
         assert (out / f).is_file() and (out / f).stat().st_size > 0, f
     s = json.loads((out / "summary.json").read_text())
     assert s["w_shape"] == [24, 24, 20]
     assert s["input_kind"] == "NPZ"
+    vlo, vhi = s["field_range_um"]                       # data-driven, not forced
+    assert vlo < vhi                                     # a real (non-empty) range
     crit = [c for c in s["checkpoint1"] if c["severity"] == "critical"]
     assert all(c["ok"] for c in crit)                    # critical checks pass
+
+
+def test_disp_norm_never_forces_symmetric():
+    import matplotlib.colors as mcolors
+    # one-signed negative field -> sequential range clamped at 0 (not [-v, v])
+    norm, cmap = ER._disp_norm(-20.0, 0.3)               # tiny positive noise
+    assert isinstance(norm, mcolors.Normalize) and cmap == "Blues_r"
+    assert norm.vmin == -20.0 and norm.vmax == 0.0
+    # a real rebound -> diverging, 0-centered, ASYMMETRIC extents
+    norm2, cmap2 = ER._disp_norm(-20.0, 4.0)
+    assert isinstance(norm2, mcolors.TwoSlopeNorm) and cmap2 == "coolwarm"
+    assert norm2.vmin == -20.0 and norm2.vmax == 4.0     # not symmetric
 
 
 _CSV = """\

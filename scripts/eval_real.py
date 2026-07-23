@@ -161,24 +161,28 @@ def _viz_raw_overview(raw, cfg, out_path):
     plt.close(fig)
 
 
-def _viz_field(w, x, y, sensor_xy, out_path):
-    import matplotlib
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-    wf, xf, yf = _mirror_full(w, x, y)
-    X, Y = np.meshgrid(xf, yf, indexing="ij")
-    disk = X * X + Y * Y <= 1.0
-    Xq, Yq = np.meshgrid(x, y, indexing="ij")
-    inq = Xq * Xq + Yq * Yq <= 1.0
-    mag_t = np.array([np.abs(w[:, :, k][inq]).mean() for k in range(w.shape[2])])
-    ts = int(np.argmax(mag_t))
-    slab = (wf[:, :, ts] * _UM).copy()
-    slab[~disk] = np.nan
-    finite = slab[np.isfinite(slab)]
-    vmax = float(np.percentile(np.abs(finite), 99)) if finite.size else 1.0
-    fig, ax = plt.subplots(figsize=(6.6, 6.0), constrained_layout=True)
-    pcm = ax.pcolormesh(X, Y, slab, cmap="coolwarm", vmin=-vmax, vmax=vmax,
-                        shading="auto")
+def _frame_idx(nt, max_frames):
+    if nt <= max_frames:
+        return np.arange(nt)
+    return np.linspace(0, nt - 1, max_frames).astype(int)
+
+
+def _disp_norm(vlo, vhi):
+    """A DATA-DRIVEN color norm for the (downward) displacement -- never forced
+    symmetric about 0. If the field is essentially one-signed negative, the
+    colorbar spans [vlo, 0] (sequential); if there is a real positive rebound
+    (gas-bulge), a diverging norm keeps 0 = neutral with ASYMMETRIC extents so
+    the small rebound shows without wasting half the bar."""
+    import matplotlib.colors as mcolors
+    if vlo < 0 and vhi > 0.02 * abs(vlo):
+        return mcolors.TwoSlopeNorm(vcenter=0.0, vmin=vlo, vmax=vhi), "coolwarm"
+    hi = min(vhi, 0.0)
+    if not (hi > vlo):
+        hi = vlo + 1e-12
+    return mcolors.Normalize(vmin=vlo, vmax=hi), "Blues_r"
+
+
+def _draw_disk(ax, sensor_xy):
     circ = np.linspace(0, 2 * np.pi, 200)
     ax.plot(np.cos(circ), np.sin(circ), color="0.3", lw=1.5)
     ax.scatter(sensor_xy[:, 0], sensor_xy[:, 1], s=70, marker="o",
@@ -186,12 +190,73 @@ def _viz_field(w, x, y, sensor_xy, out_path):
     ax.set_aspect("equal")
     ax.set_xlabel("x / R")
     ax.set_ylabel("y / R")
-    ax.set_title(f"reconstructed u_z (um), full disk, t*={ts}/{w.shape[2] - 1}")
-    fig.colorbar(pcm, ax=ax, fraction=0.046, pad=0.04, label="u_z (um)")
-    Path(out_path).parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(str(out_path), dpi=140, bbox_inches="tight")
+
+
+def _render_field(w, x, y, sensor_xy, out_dir, *, anim=True, fps=12,
+                  max_frames=60):
+    """Top-down full-disk displacement: a static snapshot at the peak time and
+    (optionally) a GIF over time, both on ONE fixed, data-driven color scale
+    (so the animation shows the real descent, not per-frame renormalization)."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    wf, xf, yf = _mirror_full(w, x, y)                     # (Xf, Yf, nt)
+    nt = w.shape[2]
+    Xq, Yq = np.meshgrid(x, y, indexing="ij")
+    inq = Xq * Xq + Yq * Yq <= 1.0
+    finite = (w[inq, :].ravel() * _UM)
+    finite = finite[np.isfinite(finite)]
+    vlo = float(np.percentile(finite, 1)) if finite.size else -1.0
+    vhi = float(np.percentile(finite, 99)) if finite.size else 0.0
+    norm, cmap = _disp_norm(vlo, vhi)
+
+    Xf, Yf = np.meshgrid(xf, yf, indexing="ij")
+    outside = (Xf * Xf + Yf * Yf) > 1.0
+    ext = [xf[0], xf[-1], yf[0], yf[-1]]
+
+    def slab(ti):
+        s = (wf[:, :, ti] * _UM).copy()
+        s[outside] = np.nan
+        return s.T                                        # imshow wants [y, x]
+
+    mag_t = np.array([np.abs(w[:, :, k][inq]).mean() for k in range(nt)])
+    ts = int(np.argmax(mag_t))
+
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    fig, ax = plt.subplots(figsize=(6.6, 6.0), constrained_layout=True)
+    im = ax.imshow(slab(ts), origin="lower", extent=ext, cmap=cmap, norm=norm,
+                   interpolation="nearest")
+    _draw_disk(ax, sensor_xy)
+    ax.set_title(f"reconstructed u_z (um), full disk, peak t*={ts}/{nt - 1}")
+    fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04, label="u_z (um)")
+    fig.savefig(str(out_dir / "real_field.png"), dpi=140, bbox_inches="tight")
     plt.close(fig)
-    return ts
+
+    if anim:
+        from matplotlib.animation import FuncAnimation, PillowWriter
+        frames = _frame_idx(nt, max_frames)
+        fig, ax = plt.subplots(figsize=(6.6, 6.4), constrained_layout=True)
+        im = ax.imshow(slab(int(frames[0])), origin="lower", extent=ext,
+                       cmap=cmap, norm=norm, interpolation="nearest")
+        _draw_disk(ax, sensor_xy)
+        fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04, label="u_z (um)")
+
+        def _upd(fi):
+            ti = int(frames[fi])
+            im.set_data(slab(ti))
+            ax.set_title(f"reconstructed u_z (um)   t={ti / (nt - 1):.2f}   "
+                         f"({ti}/{nt - 1})")
+            return [im]
+
+        gif = out_dir / "real_field_anim.gif"
+        print(f"rendering {len(frames)}-frame field GIF -> {gif}", flush=True)
+        FuncAnimation(fig, _upd, frames=len(frames), interval=1000 // fps,
+                      blit=False).save(str(gif), writer=PillowWriter(fps=fps),
+                                       dpi=100)
+        plt.close(fig)
+    return ts, vlo, vhi
 
 
 def main() -> int:
@@ -208,6 +273,11 @@ def main() -> int:
                     help="override the window cutoff (s) -- set it to where the "
                     "traces flatten at bonding completion")
     ap.add_argument("--out-dir", default="viz/real_eval")
+    ap.add_argument("--no-anim", action="store_true",
+                    help="skip the field-over-time GIF (snapshot only)")
+    ap.add_argument("--anim-fps", type=int, default=12)
+    ap.add_argument("--anim-frames", type=int, default=60,
+                    help="max frames in the field GIF (default 60)")
     args = ap.parse_args()
 
     bundle = load_bundle(args.bundle)
@@ -236,7 +306,9 @@ def main() -> int:
     x_canon = np.asarray(bundle["x_canon"])
     y_canon = np.asarray(bundle["y_canon"])
     sensor_xy = np.asarray(bundle["sensor_xy"], dtype=float)
-    ts = _viz_field(w, x_canon, y_canon, sensor_xy, out_dir / "real_field.png")
+    ts, vlo, vhi = _render_field(
+        w, x_canon, y_canon, sensor_xy, out_dir, anim=not args.no_anim,
+        fps=args.anim_fps, max_frames=args.anim_frames)
     np.savez(out_dir / "field.npz", w=w, x=x_canon, y=y_canon,
              t=np.linspace(0.0, 1.0, int(bundle["nt"])))
     (out_dir / "summary.json").write_text(json.dumps(dict(
@@ -244,11 +316,13 @@ def main() -> int:
         time_range_s=[float(t.min()), float(t.max())],
         window_s=[float(cfg.t_start), float(cfg.t_cutoff)],
         y_shape=list(y.shape), w_shape=list(w.shape), peak_t=ts,
+        field_range_um=[vlo, vhi],
         checkpoint1=[dict(name=n, severity=s, ok=bool(o), detail=d)
                      for n, s, o, d in checks],
         checkpoint1_pass=bool(ok)), indent=2))
-    print(f"\nwrote real_inputs.png, real_field.png, field.npz, summary.json "
-          f"to {out_dir}/")
+    figs = "real_inputs.png, real_field.png"
+    figs += ", real_field_anim.gif" if not args.no_anim else ""
+    print(f"\nwrote {figs}, field.npz, summary.json to {out_dir}/")
     return 0 if ok else 1
 
 
