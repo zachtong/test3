@@ -301,6 +301,7 @@ def main() -> int:
             param="cartesian", r_min=args.r_min, r_max=args.r_max,
             epochs=args.epochs, lr=args.lr, pos_lr=args.pos_lr,
             val_frac=args.val_frac, seed=args.base_seed + i,
+            split_seed=args.base_seed,        # SAME val set for every restart
             device=args.device, verbose=False, min_sep=args.min_sep,
             rep_coef=args.rep_coef)
         runs.append(res)

@@ -129,6 +129,26 @@ def test_run_records_full_history_and_stays_in_band(tiny_basis_traj):
     assert pf[:, -1, 1].min() >= 90 - 1e-3                  # sensor at 90 stays 90
 
 
+def test_split_seed_fixes_val_set_across_restarts(tiny_basis_traj):
+    # different restart seeds, same split_seed -> IDENTICAL val sims, so the
+    # best_val losses are comparable for ranking; without split_seed the val
+    # sets differ (the old ranking-noise bug)
+    bp, tp, K = tiny_basis_traj
+    from scripts.train_differentiable_placement import (_load_phi_and_a,
+                                                        _optimize)
+    Phi, a_np, (nx, ny) = _load_phi_and_a(bp, tp, None, K, 30, 1, 100)
+    r1 = _optimize(Phi, a_np, nx, ny, n=4, init="random", epochs=2,
+                   seed=11, split_seed=99, verbose=False)
+    r2 = _optimize(Phi, a_np, nx, ny, n=4, init="random", epochs=2,
+                   seed=222, split_seed=99, verbose=False)
+    assert np.array_equal(r1["val_idx"], r2["val_idx"])
+    r3 = _optimize(Phi, a_np, nx, ny, n=4, init="random", epochs=2,
+                   seed=222, verbose=False)          # no split_seed
+    assert not np.array_equal(r1["val_idx"], r3["val_idx"])
+    # different restart seeds must still give DIFFERENT random inits
+    assert not np.allclose(r1["init_pos"], r2["init_pos"])
+
+
 def test_history_save_load_roundtrip(tiny_basis_traj, tmp_path):
     bp, tp, K = tiny_basis_traj
     res = DP.run(bp, traj_path=tp, K=K, n=6, init="abcdef",

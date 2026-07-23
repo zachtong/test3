@@ -313,20 +313,28 @@ def run(basis_path, *, traj_path=None, npz_dir=None, K=12, n=6,
 
 def _optimize(Phi, a_np, nx, ny, *, n=6, init="random", init_positions=None,
               param="cartesian", r_min=0.2, r_max=0.98, epochs=300, lr=1e-3,
-              pos_lr=2e-2, val_frac=0.2, seed=7, channels=64,
+              pos_lr=2e-2, val_frac=0.2, seed=7, split_seed=None, channels=64,
               dilations=(1, 2, 4, 8, 16, 32, 64), kernel=3, device=None,
               verbose=True, min_sep=0.1, rep_coef=50.0) -> dict:
     """Gradient-optimize sensor positions on ALREADY-loaded Phi/a. Split out of
     run() so a multi-start driver can load the data ONCE and optimize from many
-    random inits cheaply."""
+    random inits cheaply.
+
+    split_seed: seed for the train/val split ONLY. A multi-start sweep must
+    pass the SAME split_seed to every restart so their best_val losses are
+    computed on the SAME validation sims and are comparable for ranking --
+    per-restart splits add val-set sampling noise to the ranking. None =
+    derive from `seed` (single-run behavior, unchanged)."""
     dev = torch.device(device) if device else torch.device(
         "cuda" if torch.cuda.is_available() else "cpu")
     torch.manual_seed(seed)
     rng = np.random.default_rng(seed)
+    split_rng = np.random.default_rng(
+        seed if split_seed is None else split_seed)
     K = Phi.shape[1]
     n_sim, _, Nt = a_np.shape
 
-    perm = rng.permutation(n_sim)
+    perm = split_rng.permutation(n_sim)
     n_val = max(1, int(round(val_frac * n_sim)))
     val_idx, tr_idx = perm[:n_val], perm[n_val:]
 
@@ -429,7 +437,8 @@ def _optimize(Phi, a_np, nx, ny, *, n=6, init="random", init_positions=None,
                 best_pos=best_pos, best_val=best_val,
                 pos_hist=pos_hist, val_hist=val_hist, moved=moved,
                 move_hist=move_hist, pos_full=pos_full, param=param,
-                K=K, n=n, r_min=r_min, r_max=r_max, n_sim=n_sim, Nt=Nt)
+                K=K, n=n, r_min=r_min, r_max=r_max, n_sim=n_sim, Nt=Nt,
+                val_idx=np.asarray(val_idx))
 
 
 def _render(res, out_path):
