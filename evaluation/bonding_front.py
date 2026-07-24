@@ -65,16 +65,22 @@ def front_radii(mask_j: np.ndarray, xf: np.ndarray, yf: np.ndarray,
 
     `mask_j` is the bonded mask (Mx, My) on the regular grid (`xf`, `yf`, in
     canonical x/R, y/R units). For each angle in `thetas` a ray is marched
-    outward and the OUTERMOST bonded<->unbonded transition (restricted to inside
-    the unit disk) is taken as the front radius. NaN where the ray is fully open
-    or fully bonded (no visible front). Returns an array shaped like `thetas`."""
+    outward and the OUTERMOST bonded<->unbonded transition is taken as the front
+    radius. NaN where the ray is fully open or fully bonded (no visible front).
+
+    `r_max` (<= 1.0) caps the search radius: the POD reconstruction has no sensor
+    support past the outer sensor ring (~0.85) and rings near the disk edge, so
+    that outermost shell is an extrapolation whose noise can otherwise latch the
+    front out to ~1.0. Restricting the search to a trusted radius keeps the front
+    physical. Returns an array shaped like `thetas`."""
     m = np.asarray(mask_j, dtype=float)
     thetas = np.asarray(thetas, dtype=float)
-    rs = np.linspace(0.0, float(r_max), int(n_r))
+    r_lim = min(float(r_max), 1.0)
+    rs = np.linspace(0.0, r_lim, int(n_r))
     out = np.full(thetas.shape, np.nan)
     for k, th in enumerate(thetas):
         px, py = rs * np.cos(th), rs * np.sin(th)
-        inside = (px * px + py * py) <= 1.0
+        inside = (px * px + py * py) <= r_lim * r_lim + 1e-12
         ii = np.where(inside)[0]
         if ii.size < 2:
             continue
@@ -92,7 +98,8 @@ def front_radii(mask_j: np.ndarray, xf: np.ndarray, yf: np.ndarray,
 def front_xy(mask_j: np.ndarray, xf: np.ndarray, yf: np.ndarray,
              thetas: np.ndarray, **kw) -> tuple[np.ndarray, np.ndarray]:
     """Front ring as (x, y) polylines in canonical units; NaN gaps break the
-    line where no front exists at that azimuth."""
+    line where no front exists at that azimuth. Accepts `r_max` (edge cap) and
+    `n_r` via **kw, forwarded to `front_radii`."""
     r = front_radii(mask_j, xf, yf, thetas, **kw)
     return r * np.cos(thetas), r * np.sin(thetas)
 

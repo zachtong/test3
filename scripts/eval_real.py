@@ -190,10 +190,11 @@ def _peak_t(w, inq) -> int:
 
 
 def _render_topdown(w, x, y, sensor_xy, out_dir, z_low, z_high, fps,
-                    max_frames, draw_front=True):
+                    max_frames, draw_front=True, front_r_max=0.95):
     """Top-down full-disk displacement animation (WAFER_CMAP, fixed z range
     across all frames). When `draw_front`, a red ring marks the bonding front
-    (the outer edge of the bonded region) per frame, as in the 2D GUI."""
+    (the outer edge of the bonded region) per frame, as in the 2D GUI.
+    `front_r_max` caps the front search radius to drop unsupported edge noise."""
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
@@ -235,7 +236,8 @@ def _render_topdown(w, x, y, sensor_xy, out_dir, z_low, z_high, fps,
         ti = int(frames[fi])
         im.set_data(slab(ti))
         if fmask is not None:
-            fx, fy = front_xy(fmask[:, :, ti], xf, yf, thetas)
+            fx, fy = front_xy(fmask[:, :, ti], xf, yf, thetas,
+                              r_max=front_r_max)
             front_line.set_data(fx, fy)
         ax.set_title(f"top-down u_z (um)   t={ti / (nt - 1):.2f}   "
                      f"({ti}/{nt - 1})")
@@ -250,7 +252,8 @@ def _render_topdown(w, x, y, sensor_xy, out_dir, z_low, z_high, fps,
 
 
 def _render_3d(w, x, y, sensor_xy, sensor_ij, out_dir, z_low, z_high, ts, fps,
-               max_frames, elev=22, azim=-60, mesh=64, draw_front=True):
+               max_frames, elev=22, azim=-60, mesh=64, draw_front=True,
+               front_r_max=0.95):
     """3D animation: the upper wafer descends over time onto the LOWER wafer
     (the peak/final-descent field, a fixed floor -- the 'peak snapshot'), on
     WAFER_CMAP with a fixed z range. Sensor markers are posts on the upper
@@ -300,7 +303,8 @@ def _render_3d(w, x, y, sensor_xy, sensor_ij, out_dir, z_low, z_high, ts, fps,
                         vmax=z_high, alpha=0.95, linewidth=0,
                         antialiased=False, rstride=1, cstride=1)
         if fmask is not None:
-            fx, fy = front_xy(fmask[:, :, ti], xf, yf, thetas)
+            fx, fy = front_xy(fmask[:, :, ti], xf, yf, thetas,
+                              r_max=front_r_max)
             fz = sample_nearest(wf[:, :, ti], xf, yf, fx, fy) * _UM
             ax.plot(fx, fy, fz, color="red", lw=2.6, zorder=12)
         for k in range(len(sxy)):
@@ -359,6 +363,10 @@ def main() -> int:
                     help="3D view elevation angle (deg)")
     ap.add_argument("--azim", type=float, default=-60.0,
                     help="3D view azimuth angle (deg)")
+    ap.add_argument("--front-r-max", type=float, default=0.95,
+                    help="cap the bonding-front search radius (<=1.0); the "
+                    "reconstruction extrapolates and rings past the outer "
+                    "sensor ring, so 0.95 drops that noisy edge shell")
     args = ap.parse_args()
 
     bundle = load_bundle(args.bundle)
@@ -395,11 +403,12 @@ def main() -> int:
     made = []
     if not args.no_anim:
         _render_topdown(w, x_canon, y_canon, sensor_xy, out_dir, z_low, z_high,
-                        args.anim_fps, args.anim_frames)
+                        args.anim_fps, args.anim_frames,
+                        front_r_max=args.front_r_max)
         made.append("real_field_topdown.gif")
         _render_3d(w, x_canon, y_canon, sensor_xy, sensor_ij, out_dir, z_low,
                    z_high, ts, args.anim_fps, args.anim_frames,
-                   elev=args.elev, azim=args.azim)
+                   elev=args.elev, azim=args.azim, front_r_max=args.front_r_max)
         made.append("real_field_3d.gif")
 
     np.savez(out_dir / "field.npz", w=w, x=x_canon, y=y_canon,

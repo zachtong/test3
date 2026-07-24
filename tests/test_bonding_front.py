@@ -55,6 +55,23 @@ def test_front_is_nan_when_fully_open_or_fully_bonded():
     assert np.all(np.isnan(front_radii(full_mask, xf, yf, thetas)))
 
 
+def test_r_max_drops_noisy_edge_ring():
+    # true front at r~0.4 plus a spurious bonded ring near the edge (r in
+    # [0.9, 1.0]) -- the reconstruction's unsupported edge noise. With the full
+    # search the OUTERMOST transition latches onto the edge ring; capping r_max
+    # at 0.85 recovers the physical inner front.
+    n = 161
+    xf = yf = np.linspace(-1.0, 1.0, n)
+    X, Y = np.meshgrid(xf, yf, indexing="ij")
+    R = np.sqrt(X * X + Y * Y)
+    mask = ((R <= 0.4) | ((R >= 0.9) & (R <= 1.0))).astype(float)
+    thetas = np.linspace(0, 2 * np.pi, 40, endpoint=False)
+    r_full = np.nanmedian(front_radii(mask, xf, yf, thetas, r_max=1.0))
+    r_cap = np.nanmedian(front_radii(mask, xf, yf, thetas, r_max=0.85))
+    assert r_full > 0.85                             # latched onto edge noise
+    assert abs(r_cap - 0.4) < 0.06                   # recovered the real front
+
+
 def test_sample_nearest_passes_nan_through():
     xf = yf = np.linspace(-1.0, 1.0, 5)
     field = np.arange(25.0).reshape(5, 5)

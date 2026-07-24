@@ -50,6 +50,8 @@ def main() -> int:
                     help="skip the field animations for every run")
     ap.add_argument("--anim-fps", type=int, default=None)
     ap.add_argument("--anim-frames", type=int, default=None)
+    ap.add_argument("--front-r-max", type=float, default=None,
+                    help="cap the bonding-front search radius (<=1.0)")
     args = ap.parse_args()
 
     csv_dir = Path(args.csv_dir)
@@ -86,6 +88,8 @@ def main() -> int:
             f += ["--anim-fps", str(args.anim_fps)]
         if args.anim_frames is not None:
             f += ["--anim-frames", str(args.anim_frames)]
+        if args.front_r_max is not None:
+            f += ["--front-r-max", str(args.front_r_max)]
         return f
 
     rows, status = [], {}

@@ -355,9 +355,11 @@ def _render_field_anims(L, raw, cfg_use, out_dir, args):
     z_low, z_high = _disp_scale(w, inq)
     ts = _peak_t(w, inq)
     _render_topdown(w, x_c, y_c, sxy, out_dir, z_low, z_high,
-                    args.anim_fps, args.anim_frames)
+                    args.anim_fps, args.anim_frames,
+                    front_r_max=args.front_r_max)
     _render_3d(w, x_c, y_c, sxy, sij, out_dir, z_low, z_high, ts,
-               args.anim_fps, args.anim_frames, elev=args.elev, azim=args.azim)
+               args.anim_fps, args.anim_frames, elev=args.elev, azim=args.azim,
+               front_r_max=args.front_r_max)
     return ["real_field_topdown.gif", "real_field_3d.gif"]
 
 
@@ -400,6 +402,9 @@ def main() -> int:
                     help="3D view elevation angle (deg)")
     ap.add_argument("--azim", type=float, default=-60.0,
                     help="3D view azimuth angle (deg)")
+    ap.add_argument("--front-r-max", type=float, default=0.95,
+                    help="cap the bonding-front search radius (<=1.0) to drop "
+                    "the noisy, unsupported edge shell of the reconstruction")
     args = ap.parse_args()
 
     cfg = (real_config_from_yaml(args.config) if args.config
