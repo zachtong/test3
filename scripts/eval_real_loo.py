@@ -123,6 +123,33 @@ def _all_records(bundles, raw, cfg):
     return recs
 
 
+def _detect_end_of_bond(t, traces, rel_thresh=0.02, tail_frac=0.1):
+    """End of bonding = end of the FINAL plateau. Each sensor SETTLES to a
+    final value (median of its last `tail_frac` of samples). Read backward: the
+    LATEST time any sensor is still away from its settled value by more than
+    `rel_thresh` of its total travel is where bonding ends. This is the
+    noise-robust form of 'the slope stops being flat' -- an intermediate hold
+    plateau sits AT a different value (still far from final), so it never fools
+    it, and plateau noise (tiny vs the descent) never trips the threshold."""
+    t = np.asarray(t, dtype=float)
+    n = t.size
+    if n < 3:
+        return float(t[-1]) if n else 0.0
+    tail = max(3, int(tail_frac * n))
+    t_end = float(t[0])
+    for tr in traces:
+        tr = np.asarray(tr, dtype=float)
+        final = float(np.median(tr[-tail:]))
+        dev = np.abs(tr - final)
+        span = float(dev.max())
+        if span <= 0:
+            continue
+        moving = dev > rel_thresh * span         # still away from settled value
+        if moving.any():
+            t_end = max(t_end, float(t[int(np.max(np.where(moving)[0]))]))
+    return t_end
+
+
 def _grid(spec, fixed):
     if spec is None:
         return [float(fixed)]
@@ -305,6 +332,16 @@ def main() -> int:
                     metavar=("LO", "HI", "STEP"))
     ap.add_argument("--sweep-t-cutoff", nargs=3, type=float, default=None,
                     metavar=("LO", "HI", "STEP"))
+    ap.add_argument("--auto-cutoff", action="store_true",
+                    help="auto-detect the end of bonding (latest time any "
+                    "sensor is still moving = end of the final plateau) and "
+                    "sweep t_cutoff +/- halfwidth around it. With this on, "
+                    "t_start defaults to sweeping 0..0.5 step 0.1 unless "
+                    "--sweep-t-start is given.")
+    ap.add_argument("--auto-cutoff-halfwidth", type=float, default=1.5,
+                    help="+/- range around the detected end (s, default 1.5)")
+    ap.add_argument("--auto-cutoff-step", type=float, default=0.2,
+                    help="t_cutoff step in auto mode (s, default 0.2)")
     ap.add_argument("--out-dir", default="viz/real_loo")
     args = ap.parse_args()
 
@@ -322,9 +359,24 @@ def main() -> int:
     out_dir.mkdir(parents=True, exist_ok=True)
     swept = None
     cfg_use = base
-    if args.sweep_t_start is not None or args.sweep_t_cutoff is not None:
-        tstarts = _grid(args.sweep_t_start, base.t_start)
-        tcutoffs = _grid(args.sweep_t_cutoff, base.t_cutoff)
+    t_end = None
+    if (args.sweep_t_start is not None or args.sweep_t_cutoff is not None
+            or args.auto_cutoff):
+        if args.auto_cutoff:
+            traces = [np.asarray(raw[ch.key], dtype=float)
+                      for ch in cfg.channels if ch.key in raw]
+            t_end = _detect_end_of_bond(t, traces)
+            hw, st = args.auto_cutoff_halfwidth, args.auto_cutoff_step
+            tcutoffs = _grid([t_end - hw, t_end + hw, st], base.t_cutoff)
+            tstarts = _grid(args.sweep_t_start
+                            if args.sweep_t_start is not None
+                            else [0.0, 0.5, 0.1], base.t_start)
+            print(f"auto end-of-bond at t={t_end:.2f}s -> t_cutoff grid "
+                  f"[{t_end - hw:.2f}, {t_end + hw:.2f}] step {st}; "
+                  f"t_start grid {tstarts[0]:g}..{tstarts[-1]:g}", flush=True)
+        else:
+            tstarts = _grid(args.sweep_t_start, base.t_start)
+            tcutoffs = _grid(args.sweep_t_cutoff, base.t_cutoff)
         print(f"sweeping {len(tstarts)}x{len(tcutoffs)} windows ...", flush=True)
         M, best = _sweep(bundles, raw, cfg, tstarts, tcutoffs,
                          data_lo, data_hi)
@@ -338,7 +390,9 @@ def main() -> int:
         cfg_use = dataclasses.replace(cfg, t_start=float(bts),
                                       t_cutoff=float(btc))
         swept = dict(best_window_s=[bts, btc], best_median_rel_l2=best[0],
-                     t_starts=tstarts, t_cutoffs=tcutoffs)
+                     t_starts=tstarts, t_cutoffs=tcutoffs,
+                     auto_end_of_bond_s=(None if t_end is None
+                                         else float(t_end)))
 
     records = []
     for L in bundles:

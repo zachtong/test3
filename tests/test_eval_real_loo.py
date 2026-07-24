@@ -68,6 +68,50 @@ def _mk_bundle(positions, path, nx=32, ny=32, K=6, nt=20):
         seeds=[7], state_dicts=[m.state_dict()]), path)
 
 
+def test_detect_end_of_bond_ignores_intermediate_hold():
+    t = np.linspace(0, 20, 300)
+
+    def tr(end2):
+        w = np.zeros_like(t)
+        for i, ti in enumerate(t):
+            if ti < 3:
+                w[i] = -10 * ti / 3
+            elif ti < 6:
+                w[i] = -10                      # intermediate HOLD plateau
+            elif ti < end2:
+                w[i] = -10 - 10 * (ti - 6) / (end2 - 6)
+            else:
+                w[i] = -20                      # final plateau
+        return w
+    te = LOO._detect_end_of_bond(t, [tr(9.0) for _ in range(3)])
+    assert 8.3 < te < 9.6                        # FINAL descent end, not the hold
+
+
+def test_detect_end_of_bond_single_plateau():
+    t = np.linspace(0, 20, 300)
+    tr = -15 * np.clip(t, 0, 7) / 7
+    te = LOO._detect_end_of_bond(t, [tr, tr, tr])
+    assert 6.4 < te < 7.8
+
+
+def test_auto_cutoff_end_to_end(tmp_path):
+    import subprocess
+    import json
+    _mk_bundle([_A, _B, _C, _D, _E], tmp_path / "n5_ABCDE.pt")
+    real = _make_real(tmp_path)
+    out = tmp_path / "loo"
+    r = subprocess.run(
+        [sys.executable, "scripts/eval_real_loo.py",
+         "--bundles", str(tmp_path / "n5_ABCDE.pt"), "--real", str(real),
+         "--config", str(_root / "configs" / "real_exp_n6.yaml"),
+         "--auto-cutoff", "--out-dir", str(out)],
+        cwd=str(_root), capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr[-800:]
+    assert "auto end-of-bond" in r.stdout
+    s = json.loads((out / "real" / "summary.json").read_text())
+    assert s["sweep"]["auto_end_of_bond_s"] is not None
+
+
 def test_grid_generation():
     assert LOO._grid(None, 7.5) == [7.5]                       # fixed axis
     assert LOO._grid([6.0, 8.0, 0.5], 0) == [6.0, 6.5, 7.0, 7.5, 8.0]
