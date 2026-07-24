@@ -42,6 +42,14 @@ def main() -> int:
     ap.add_argument("--sweep-t-cutoff", nargs=3, type=float, default=None)
     ap.add_argument("--t-start", type=float, default=None)
     ap.add_argument("--t-cutoff", type=float, default=None)
+    # deployment-field animations -- forwarded to eval_real_loo per CSV
+    ap.add_argument("--field-bundle", default=None,
+                    help="bundle for the field animations (default: best LOO "
+                    "bundle; pass the n6 ABCDEF bundle for the deployment field)")
+    ap.add_argument("--no-anim", action="store_true",
+                    help="skip the field animations for every run")
+    ap.add_argument("--anim-fps", type=int, default=None)
+    ap.add_argument("--anim-frames", type=int, default=None)
     args = ap.parse_args()
 
     csv_dir = Path(args.csv_dir)
@@ -70,6 +78,14 @@ def main() -> int:
             f += ["--t-start", str(args.t_start)]
         if args.t_cutoff is not None:
             f += ["--t-cutoff", str(args.t_cutoff)]
+        if args.field_bundle:
+            f += ["--field-bundle", args.field_bundle]
+        if args.no_anim:
+            f += ["--no-anim"]
+        if args.anim_fps is not None:
+            f += ["--anim-fps", str(args.anim_fps)]
+        if args.anim_frames is not None:
+            f += ["--anim-frames", str(args.anim_frames)]
         return f
 
     rows, status = [], {}

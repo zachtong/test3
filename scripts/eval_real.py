@@ -190,15 +190,17 @@ def _peak_t(w, inq) -> int:
 
 
 def _render_topdown(w, x, y, sensor_xy, out_dir, z_low, z_high, fps,
-                    max_frames):
+                    max_frames, draw_front=True):
     """Top-down full-disk displacement animation (WAFER_CMAP, fixed z range
-    across all frames)."""
+    across all frames). When `draw_front`, a red ring marks the bonding front
+    (the outer edge of the bonded region) per frame, as in the 2D GUI."""
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
     from matplotlib.animation import FuncAnimation, PillowWriter
     from matplotlib.colors import Normalize
     from evaluation.palette import WAFER_CMAP
+    from evaluation.bonding_front import bonded_mask, front_xy
 
     wf, xf, yf = _mirror_full(w, x, y)
     nt = w.shape[2]
@@ -206,6 +208,8 @@ def _render_topdown(w, x, y, sensor_xy, out_dir, z_low, z_high, fps,
     outside = (Xf * Xf + Yf * Yf) > 1.0
     ext = [xf[0], xf[-1], yf[0], yf[-1]]
     norm = Normalize(vmin=z_low, vmax=z_high)
+    fmask = bonded_mask(wf) if draw_front else None
+    thetas = np.linspace(0, 2 * np.pi, 181)
 
     def slab(ti):
         s = (wf[:, :, ti] * _UM).copy()
@@ -218,6 +222,8 @@ def _render_topdown(w, x, y, sensor_xy, out_dir, z_low, z_high, fps,
                    cmap=WAFER_CMAP, norm=norm, interpolation="nearest")
     circ = np.linspace(0, 2 * np.pi, 200)
     ax.plot(np.cos(circ), np.sin(circ), color="0.3", lw=1.4)
+    front_line, = ax.plot([], [], color="red", lw=2.2, zorder=6,
+                          label="bonding front")
     ax.scatter(sensor_xy[:, 0], sensor_xy[:, 1], s=60, facecolor="none",
                edgecolor="k", linewidth=1.3, zorder=5)
     ax.set_aspect("equal")
@@ -228,9 +234,12 @@ def _render_topdown(w, x, y, sensor_xy, out_dir, z_low, z_high, fps,
     def _upd(fi):
         ti = int(frames[fi])
         im.set_data(slab(ti))
+        if fmask is not None:
+            fx, fy = front_xy(fmask[:, :, ti], xf, yf, thetas)
+            front_line.set_data(fx, fy)
         ax.set_title(f"top-down u_z (um)   t={ti / (nt - 1):.2f}   "
                      f"({ti}/{nt - 1})")
-        return [im]
+        return [im, front_line]
 
     gif = Path(out_dir) / "real_field_topdown.gif"
     print(f"rendering {len(frames)}-frame top-down GIF -> {gif}", flush=True)
@@ -241,17 +250,21 @@ def _render_topdown(w, x, y, sensor_xy, out_dir, z_low, z_high, fps,
 
 
 def _render_3d(w, x, y, sensor_xy, sensor_ij, out_dir, z_low, z_high, ts, fps,
-               max_frames, elev=22, azim=-60, mesh=64):
+               max_frames, elev=22, azim=-60, mesh=64, draw_front=True):
     """3D animation: the upper wafer descends over time onto the LOWER wafer
     (the peak/final-descent field, a fixed floor -- the 'peak snapshot'), on
     WAFER_CMAP with a fixed z range. Sensor markers are posts on the upper
-    surface. Mirrors the quarter to the full disk."""
+    surface. When `draw_front`, a red ring rides the descending upper surface at
+    the bonding front (the outer edge of the bonded region). Mirrors the quarter
+    to the full disk."""
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
     from matplotlib.animation import FuncAnimation, PillowWriter
     from mpl_toolkits.mplot3d import Axes3D                # noqa: F401
     from evaluation.palette import WAFER_CMAP, sensor_color
+    from evaluation.bonding_front import (bonded_mask, front_xy,
+                                          sample_nearest)
 
     wf, xf, yf = _mirror_full(w, x, y)
     nt = w.shape[2]
@@ -260,6 +273,8 @@ def _render_3d(w, x, y, sensor_xy, sensor_ij, out_dir, z_low, z_high, ts, fps,
     wf_d = wf[np.ix_(xi, xi)]                              # (md, md, nt)
     Xd, Yd = np.meshgrid(xf[xi], yf[xi], indexing="ij")
     outside = (Xd * Xd + Yd * Yd) > 1.0
+    fmask = bonded_mask(wf) if draw_front else None
+    thetas = np.linspace(0, 2 * np.pi, 181)
 
     def surf(ti):
         Z = (wf_d[:, :, ti] * _UM).copy()
@@ -284,6 +299,10 @@ def _render_3d(w, x, y, sensor_xy, sensor_ij, out_dir, z_low, z_high, ts, fps,
         ax.plot_surface(Xd, Yd, surf(ti), cmap=WAFER_CMAP, vmin=z_low,
                         vmax=z_high, alpha=0.95, linewidth=0,
                         antialiased=False, rstride=1, cstride=1)
+        if fmask is not None:
+            fx, fy = front_xy(fmask[:, :, ti], xf, yf, thetas)
+            fz = sample_nearest(wf[:, :, ti], xf, yf, fx, fy) * _UM
+            ax.plot(fx, fy, fz, color="red", lw=2.6, zorder=12)
         for k in range(len(sxy)):
             zc = float(w[sij[k, 0], sij[k, 1], ti]) * _UM
             ax.plot([sxy[k, 0]] * 2, [sxy[k, 1]] * 2, [zc, zc + post],

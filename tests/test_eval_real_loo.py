@@ -104,7 +104,7 @@ def test_auto_cutoff_end_to_end(tmp_path):
         [sys.executable, "scripts/eval_real_loo.py",
          "--bundles", str(tmp_path / "n5_ABCDE.pt"), "--real", str(real),
          "--config", str(_root / "configs" / "real_exp_n6.yaml"),
-         "--auto-cutoff", "--out-dir", str(out)],
+         "--auto-cutoff", "--no-anim", "--out-dir", str(out)],
         cwd=str(_root), capture_output=True, text=True)
     assert r.returncode == 0, r.stderr[-800:]
     assert "auto end-of-bond" in r.stdout
@@ -139,6 +139,23 @@ def test_loo_end_to_end(tmp_path):
     assert np.isfinite(rec["rel_l2"])
 
 
+def test_loo_renders_field_animations_with_front(tmp_path):
+    import subprocess
+    _mk_bundle([_A, _B, _C, _D, _E], tmp_path / "n5_ABCDE.pt")   # out F
+    real = _make_real(tmp_path)
+    out = tmp_path / "loo"
+    r = subprocess.run(
+        [sys.executable, "scripts/eval_real_loo.py",
+         "--bundles", str(tmp_path / "n5_ABCDE.pt"), "--real", str(real),
+         "--config", str(_root / "configs" / "real_exp_n6.yaml"),
+         "--anim-frames", "5", "--out-dir", str(out)],
+        cwd=str(_root), capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr[-800:]
+    run = out / "real"
+    for f in ("real_field_topdown.gif", "real_field_3d.gif"):
+        assert (run / f).is_file() and (run / f).stat().st_size > 0, f
+
+
 def test_window_sweep_picks_best(tmp_path):
     import subprocess
     _mk_bundle([_A, _B, _C, _D, _E], tmp_path / "n5_ABCDE.pt")
@@ -150,7 +167,8 @@ def test_window_sweep_picks_best(tmp_path):
          "--bundles", str(tmp_path / "n5_ABCDE.pt"),
          str(tmp_path / "n5_ABCDF.pt"), "--real", str(real),
          "--config", str(_root / "configs" / "real_exp_n6.yaml"),
-         "--sweep-t-cutoff", "6", "12", "2", "--out-dir", str(out)],
+         "--sweep-t-cutoff", "6", "12", "2", "--no-anim",
+         "--out-dir", str(out)],
         cwd=str(_root), capture_output=True, text=True)
     assert r.returncode == 0, r.stderr[-800:]
     run = out / "real"                                        # <out>/<csv stem>/

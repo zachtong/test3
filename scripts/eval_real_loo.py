@@ -47,7 +47,8 @@ from training.normalization import (NormStats, apply_norm,    # noqa: E402
 from scripts.reconstruct import (load_bundle, _build_models,  # noqa: E402
                                  _resample)
 from scripts.eval_real import (_load_raw, _apply_window,      # noqa: E402
-                               _default_config)
+                               _default_config, _disp_scale, _peak_t,
+                               _render_topdown, _render_3d)
 
 _UM = 1.0e6
 _ABCDEF = [(0.52, 0.0, "A"), (0.52, 45.0, "B"), (0.52, 90.0, "C"),
@@ -319,6 +320,47 @@ def _render(records, out_path):
     plt.close(fig)
 
 
+def _pick_field_bundle(bundles, records, field_bundle):
+    """Which bundle reconstructs the deployment field for the animations.
+
+    Prefer an explicit --field-bundle (typically the all-six ABCDEF n6 bundle,
+    i.e. the real deployment config). Otherwise fall back to the loaded bundle
+    with the LOWEST median held-out rel-L2 -- the most self-consistent one, so
+    the animation shows the reconstruction we trust most. Returns (L, note)."""
+    if field_bundle is not None:
+        return _load(field_bundle), f"--field-bundle {Path(field_bundle).stem}"
+    by_tag = {}
+    for r in records:
+        by_tag.setdefault(r["tag"], []).append(r["rel_l2"])
+    med = {t: float(np.median(v)) for t, v in by_tag.items()}
+    if not med:
+        return bundles[0], f"first bundle {bundles[0]['tag']}"
+    best_tag = min(med, key=med.get)
+    L = next((b for b in bundles if b["tag"] == best_tag), bundles[0])
+    return L, f"best LOO bundle {best_tag} (median rel-L2 {med[best_tag]:.3f})"
+
+
+def _render_field_anims(L, raw, cfg_use, out_dir, args):
+    """Reconstruct the full field from bundle L at the chosen window and render
+    the top-down + 3D bonding animations (WAFER_CMAP, red bonding front) into
+    the per-run folder -- the same views the single-run eval_real produces."""
+    b = L["b"]
+    y_in, t_in = assemble_inputs(raw, b["sensor_rtheta"], cfg_use)
+    w = _recon(L, y_in, t_in)
+    x_c, y_c = np.asarray(b["x_canon"]), np.asarray(b["y_canon"])
+    sxy = np.asarray(b["sensor_xy"], dtype=float)
+    sij = np.asarray(b["sensor_ij"], dtype=int)
+    Xq, Yq = np.meshgrid(x_c, y_c, indexing="ij")
+    inq = Xq * Xq + Yq * Yq <= 1.0
+    z_low, z_high = _disp_scale(w, inq)
+    ts = _peak_t(w, inq)
+    _render_topdown(w, x_c, y_c, sxy, out_dir, z_low, z_high,
+                    args.anim_fps, args.anim_frames)
+    _render_3d(w, x_c, y_c, sxy, sij, out_dir, z_low, z_high, ts,
+               args.anim_fps, args.anim_frames, elev=args.elev, azim=args.azim)
+    return ["real_field_topdown.gif", "real_field_3d.gif"]
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--bundles", nargs="+", required=True,
@@ -343,6 +385,21 @@ def main() -> int:
     ap.add_argument("--auto-cutoff-step", type=float, default=0.2,
                     help="t_cutoff step in auto mode (s, default 0.2)")
     ap.add_argument("--out-dir", default="viz/real_loo")
+    # deployment-field animations (top-down + 3D, with the bonding front)
+    ap.add_argument("--field-bundle", default=None,
+                    help="bundle used to reconstruct the field for the "
+                    "animations (default: the most self-consistent LOO bundle; "
+                    "pass the all-six n6 ABCDEF bundle for the true deployment "
+                    "field)")
+    ap.add_argument("--no-anim", action="store_true",
+                    help="skip the top-down + 3D field animations")
+    ap.add_argument("--anim-fps", type=int, default=12)
+    ap.add_argument("--anim-frames", type=int, default=40,
+                    help="max frames per field GIF (default 40)")
+    ap.add_argument("--elev", type=float, default=22.0,
+                    help="3D view elevation angle (deg)")
+    ap.add_argument("--azim", type=float, default=-60.0,
+                    help="3D view azimuth angle (deg)")
     args = ap.parse_args()
 
     cfg = (real_config_from_yaml(args.config) if args.config
@@ -417,6 +474,18 @@ def main() -> int:
 
     _render(records, out_dir / "loo.png")
     per_model = _render_per_model(bundles, records, out_dir)
+
+    anims = []
+    if not args.no_anim:
+        L_field, note = _pick_field_bundle(bundles, records, args.field_bundle)
+        print(f"\nrendering deployment-field animations from {note} ...",
+              flush=True)
+        try:
+            anims = _render_field_anims(L_field, raw, cfg_use, out_dir, args)
+        except (ValueError, KeyError, OSError) as e:
+            print(f"  skipped animations: {type(e).__name__}: {e}",
+                  file=sys.stderr)
+
     (out_dir / "summary.json").write_text(json.dumps(dict(
         real=str(args.real),
         window_s=[float(cfg_use.t_start), float(cfg_use.t_cutoff)],
@@ -427,6 +496,7 @@ def main() -> int:
     outs = ["loo.png", "summary.json"] + [f"{len(per_model)}x model_*.png"]
     if swept:
         outs.insert(1, "loo_sweep.png")
+    outs += anims
     print(f"\nwrote {', '.join(outs)} to {out_dir}/")
     return 0
 

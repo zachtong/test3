@@ -63,7 +63,7 @@ def test_batch_loo_over_folder(tmp_path):
         [sys.executable, "run_loo_batch.py", "--csv-dir", str(cd),
          "--bundles", str(bd / "merged_sweep_k12_n5_ABCDE.pt"),
          "--config", str(_root / "configs" / "real_exp_n6.yaml"),
-         "--auto-cutoff", "--out-dir", str(out)],
+         "--auto-cutoff", "--no-anim", "--out-dir", str(out)],
         cwd=str(_root), capture_output=True, text=True)
     assert r.returncode == 0, r.stderr[-800:]
     for nm in ("run_A", "run_B"):                              # per-run folders
@@ -78,7 +78,7 @@ def test_batch_loo_over_folder(tmp_path):
         [sys.executable, "run_loo_batch.py", "--csv-dir", str(cd),
          "--bundles", str(bd / "merged_sweep_k12_n5_ABCDE.pt"),
          "--config", str(_root / "configs" / "real_exp_n6.yaml"),
-         "--auto-cutoff", "--out-dir", str(out), "--skip-existing"],
+         "--auto-cutoff", "--no-anim", "--out-dir", str(out), "--skip-existing"],
         cwd=str(_root), capture_output=True, text=True)
     assert r2.returncode == 0
     assert "[skip]" in r2.stdout
