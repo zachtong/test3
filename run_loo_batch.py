@@ -10,6 +10,11 @@ reconstruct self-consistently and which are suspect.
         --bundles bundles/merged_sweep_k12_n5_*.pt \\
         --config configs/real_exp_n6.yaml --auto-cutoff \\
         --out-dir viz/real_loo
+
+Include the full six-sensor ABCDEF bundle in --bundles (e.g. widen the glob to
+bundles/merged_sweep_k12_*.pt) and it is auto-selected as the deployment field
+for the top-down + 3D animations -- no --field-bundle needed. It holds nothing
+out, so it adds no LOO comparison, only the animated field.
 """
 from __future__ import annotations
 import argparse
@@ -44,8 +49,10 @@ def main() -> int:
     ap.add_argument("--t-cutoff", type=float, default=None)
     # deployment-field animations -- forwarded to eval_real_loo per CSV
     ap.add_argument("--field-bundle", default=None,
-                    help="bundle for the field animations (default: best LOO "
-                    "bundle; pass the n6 ABCDEF bundle for the deployment field)")
+                    help="bundle for the field animations. If omitted, a full "
+                    "six-sensor ABCDEF bundle present in --bundles is auto-used "
+                    "(include it in the glob, e.g. bundles/merged_sweep_*.pt); "
+                    "else the best LOO subset is used.")
     ap.add_argument("--no-anim", action="store_true",
                     help="skip the field animations for every run")
     ap.add_argument("--anim-fps", type=int, default=None)

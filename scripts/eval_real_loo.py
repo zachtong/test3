@@ -320,15 +320,26 @@ def _render(records, out_path):
     plt.close(fig)
 
 
+def _is_full_abcdef(L):
+    """True when a loaded bundle carries all six ABCDEF sensors -- the real
+    deployment config. Detected by content (nothing is left out), so it does
+    not depend on the file name."""
+    return not _leftout(L["b"]["sensor_rtheta"])
+
+
 def _pick_field_bundle(bundles, records, field_bundle):
     """Which bundle reconstructs the deployment field for the animations.
 
-    Prefer an explicit --field-bundle (typically the all-six ABCDEF n6 bundle,
-    i.e. the real deployment config). Otherwise fall back to the loaded bundle
-    with the LOWEST median held-out rel-L2 -- the most self-consistent one, so
-    the animation shows the reconstruction we trust most. Returns (L, note)."""
+    Priority: (1) an explicit --field-bundle; (2) auto-detect a full six-sensor
+    ABCDEF bundle among --bundles -- it holds nothing out, so it contributes no
+    LOO records but is exactly the deployment field we want to animate; (3) fall
+    back to the loaded bundle with the LOWEST median held-out rel-L2 (the most
+    self-consistent subset). Returns (L, note)."""
     if field_bundle is not None:
         return _load(field_bundle), f"--field-bundle {Path(field_bundle).stem}"
+    full = [L for L in bundles if _is_full_abcdef(L)]
+    if full:
+        return full[0], f"auto-detected full ABCDEF bundle {full[0]['tag']}"
     by_tag = {}
     for r in records:
         by_tag.setdefault(r["tag"], []).append(r["rel_l2"])
@@ -390,9 +401,9 @@ def main() -> int:
     # deployment-field animations (top-down + 3D, with the bonding front)
     ap.add_argument("--field-bundle", default=None,
                     help="bundle used to reconstruct the field for the "
-                    "animations (default: the most self-consistent LOO bundle; "
-                    "pass the all-six n6 ABCDEF bundle for the true deployment "
-                    "field)")
+                    "animations. Default: auto-pick a full six-sensor ABCDEF "
+                    "bundle if one is present in --bundles, else the most "
+                    "self-consistent LOO subset. Pass a path to override.")
     ap.add_argument("--no-anim", action="store_true",
                     help="skip the top-down + 3D field animations")
     ap.add_argument("--anim-fps", type=int, default=12)

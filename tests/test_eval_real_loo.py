@@ -139,6 +139,28 @@ def test_loo_end_to_end(tmp_path):
     assert np.isfinite(rec["rel_l2"])
 
 
+def test_pick_field_bundle_auto_detects_full_abcdef(tmp_path):
+    _mk_bundle([_A, _B, _C, _D, _E], tmp_path / "n5_ABCDE.pt")        # subset
+    _mk_bundle([_A, _B, _C, _D, _E, _F], tmp_path / "n6_ABCDEF.pt")   # full
+    bundles = [LOO._load(str(tmp_path / "n5_ABCDE.pt")),
+               LOO._load(str(tmp_path / "n6_ABCDEF.pt"))]
+    records = [dict(tag="n5_ABCDE", rel_l2=0.01)]     # n5 looks best by LOO
+    L, note = LOO._pick_field_bundle(bundles, records, None)
+    assert L["tag"] == "n6_ABCDEF"                    # full ABCDEF still wins
+    assert "auto-detected full ABCDEF" in note
+
+
+def test_pick_field_bundle_falls_back_to_best_loo(tmp_path):
+    _mk_bundle([_A, _B, _C, _D, _E], tmp_path / "n5_ABCDE.pt")
+    _mk_bundle([_A, _B, _C, _D, _F], tmp_path / "n5_ABCDF.pt")
+    bundles = [LOO._load(str(tmp_path / "n5_ABCDE.pt")),
+               LOO._load(str(tmp_path / "n5_ABCDF.pt"))]
+    records = [dict(tag="n5_ABCDE", rel_l2=0.5),
+               dict(tag="n5_ABCDF", rel_l2=0.1)]      # ABCDF more self-consistent
+    L, note = LOO._pick_field_bundle(bundles, records, None)
+    assert L["tag"] == "n5_ABCDF" and "best LOO" in note
+
+
 def test_loo_renders_field_animations_with_front(tmp_path):
     import subprocess
     _mk_bundle([_A, _B, _C, _D, _E], tmp_path / "n5_ABCDE.pt")   # out F
