@@ -192,6 +192,76 @@ def _render_sweep(tstarts, tcutoffs, M, best, out_path):
     plt.close(fig)
 
 
+def _in_used(r, th, used, r_tol=0.02, th_tol=5.0):
+    return any(abs(u[0] - r) <= r_tol and abs(u[1] - th) <= th_tol
+               for u in used)
+
+
+def _render_per_model(bundles, records, out_dir):
+    """One figure per bundle: LEFT the ABCDEF layout with the 5 used sensors
+    SOLID and the held-out one(s) HOLLOW; RIGHT that bundle's held-out
+    measured-vs-predicted LOO curve(s)."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    by_tag = {}
+    for r in records:
+        by_tag.setdefault(r["tag"], []).append(r)
+    arc = np.linspace(0, 90, 120)
+    written = []
+    for L in bundles:
+        tag = L["tag"]
+        recs = by_tag.get(tag, [])
+        if not recs:
+            continue
+        used = np.asarray(L["b"]["sensor_rtheta"], dtype=float).reshape(-1, 2)
+        fig, (axl, axr) = plt.subplots(
+            1, 2, figsize=(10.4, 4.5), constrained_layout=True,
+            gridspec_kw=dict(width_ratios=[1.0, 1.2]))
+        # left: quarter-disk layout
+        axl.plot(np.cos(np.deg2rad(arc)), np.sin(np.deg2rad(arc)),
+                 color="0.35", lw=2)
+        axl.plot([0, 1.05], [0, 0], color="0.7", lw=1)
+        axl.plot([0, 0], [0, 1.05], color="0.7", lw=1)
+        for r, th, lab in _ABCDEF:
+            x, y = r * np.cos(np.deg2rad(th)), r * np.sin(np.deg2rad(th))
+            if _in_used(r, th, used):
+                axl.scatter(x, y, s=170, marker="o", color="#3d5a80",
+                            edgecolor="k", linewidth=1.0, zorder=5)
+            else:                                          # held out -> hollow
+                axl.scatter(x, y, s=210, marker="o", facecolor="none",
+                            edgecolor="#e63946", linewidth=2.6, zorder=6)
+            axl.annotate(lab, (x, y), xytext=(7, 6),
+                         textcoords="offset points", fontsize=10,
+                         fontweight="bold", color="0.2")
+        axl.set_aspect("equal")
+        axl.set_xlim(-0.08, 1.15)
+        axl.set_ylim(-0.08, 1.15)
+        axl.set_xlabel("x / R")
+        axl.set_ylabel("y / R")
+        axl.set_title(f"{tag}\nsolid = used (5),  hollow = held out",
+                      fontsize=10)
+        axl.grid(alpha=0.25)
+        # right: LOO curve(s) for this bundle
+        for r in recs:
+            axr.plot(r["t"], r["meas"] * _UM, "-", color="black", lw=1.8,
+                     label=f"measured ({r['label']})")
+            axr.plot(r["t"], r["pred"] * _UM, "--", color="#e63946", lw=1.8,
+                     label=f"predicted ({r['label']})")
+        axr.set_title("held-out: measured vs predicted   "
+                      + ",  ".join(f"{r['label']} relL2={r['rel_l2']:.3f}"
+                                   for r in recs), fontsize=9)
+        axr.set_xlabel("normalized time")
+        axr.set_ylabel("u_z (um)")
+        axr.legend(fontsize=8)
+        axr.grid(alpha=0.3)
+        p = Path(out_dir) / f"model_{tag}.png"
+        fig.savefig(str(p), dpi=140, bbox_inches="tight")
+        plt.close(fig)
+        written.append(p.name)
+    return written
+
+
 def _render(records, out_path):
     import matplotlib
     matplotlib.use("Agg")
@@ -248,7 +318,7 @@ def main() -> int:
     print(f"loading {len(args.bundles)} bundle(s) ...", flush=True)
     bundles = [_load(p) for p in args.bundles]
 
-    out_dir = Path(args.out_dir)
+    out_dir = Path(args.out_dir) / Path(args.real).stem   # per-run subfolder
     out_dir.mkdir(parents=True, exist_ok=True)
     swept = None
     cfg_use = base
@@ -292,6 +362,7 @@ def main() -> int:
           f"max {rels.max():.4f} (worst held-out sensor)")
 
     _render(records, out_dir / "loo.png")
+    per_model = _render_per_model(bundles, records, out_dir)
     (out_dir / "summary.json").write_text(json.dumps(dict(
         real=str(args.real),
         window_s=[float(cfg_use.t_start), float(cfg_use.t_cutoff)],
@@ -299,9 +370,10 @@ def main() -> int:
         median_rel_l2=float(np.median(rels)), max_rel_l2=float(rels.max()),
         comparisons=[dict(held_out=r["label"], rel_l2=r["rel_l2"],
                           bundle=r["tag"]) for r in records]), indent=2))
-    outs = "loo.png, summary.json" + (
-        ", loo_sweep.png" if swept else "")
-    print(f"\nwrote {outs} to {out_dir}/")
+    outs = ["loo.png", "summary.json"] + [f"{len(per_model)}x model_*.png"]
+    if swept:
+        outs.insert(1, "loo_sweep.png")
+    print(f"\nwrote {', '.join(outs)} to {out_dir}/")
     return 0
 
 

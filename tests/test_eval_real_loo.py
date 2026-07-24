@@ -109,9 +109,14 @@ def test_window_sweep_picks_best(tmp_path):
          "--sweep-t-cutoff", "6", "12", "2", "--out-dir", str(out)],
         cwd=str(_root), capture_output=True, text=True)
     assert r.returncode == 0, r.stderr[-800:]
-    assert (out / "loo_sweep.png").is_file()
+    run = out / "real"                                        # <out>/<csv stem>/
+    assert (run / "loo_sweep.png").is_file()
+    assert (run / "loo.png").is_file()
+    # one per-model figure per bundle, held-out sensor hollow
+    assert (run / "model_n5_ABCDE.png").is_file()
+    assert (run / "model_n5_ABCDF.png").is_file()
     import json
-    s = json.loads((out / "summary.json").read_text())
+    s = json.loads((run / "summary.json").read_text())
     assert s["sweep"] is not None
     bts, btc = s["sweep"]["best_window_s"]
     assert 6.0 <= btc <= 12.0 and s["window_s"][1] == btc     # best cutoff used
