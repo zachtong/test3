@@ -68,19 +68,50 @@ def _mk_bundle(positions, path, nx=32, ny=32, K=6, nt=20):
         seeds=[7], state_dicts=[m.state_dict()]), path)
 
 
-def test_loo_end_to_end(tmp_path):
-    _mk_bundle([_A, _B, _C, _D, _E], tmp_path / "n5_ABCDE.pt")   # out F
-    T = 50
+def test_grid_generation():
+    assert LOO._grid(None, 7.5) == [7.5]                       # fixed axis
+    assert LOO._grid([6.0, 8.0, 0.5], 0) == [6.0, 6.5, 7.0, 7.5, 8.0]
+
+
+def _make_real(tmp_path, T=50):
     raw = {"time": np.linspace(0, 13, T)}
     for i, k in enumerate(["w_XM", "w_DM", "w_YM", "w_XE", "w_DE", "w_YE"]):
         raw[k] = -(i + 1) * 1e-6 * (1 - np.exp(-np.linspace(0, 13, T) / 3))
     np.savez(tmp_path / "real.npz", **raw)
+    return tmp_path / "real.npz"
 
+
+def test_loo_end_to_end(tmp_path):
+    _mk_bundle([_A, _B, _C, _D, _E], tmp_path / "n5_ABCDE.pt")   # out F
+    real = _make_real(tmp_path)
     cfg = real_config_from_yaml(str(_root / "configs" / "real_exp_n6.yaml"))
-    r2 = _load_raw(str(tmp_path / "real.npz"))
-    _b, recs = LOO._one_bundle(str(tmp_path / "n5_ABCDE.pt"), r2, cfg)
+    r2 = _load_raw(str(real))
+    L = LOO._load(str(tmp_path / "n5_ABCDE.pt"))
+    recs = LOO._one_bundle(L, r2, cfg)
     assert len(recs) == 1
     rec = recs[0]
     assert rec["label"] == "F"                                # held-out sensor
     assert rec["pred"].shape == (20,) and rec["meas"].shape == (20,)
     assert np.isfinite(rec["rel_l2"])
+
+
+def test_window_sweep_picks_best(tmp_path):
+    import subprocess
+    _mk_bundle([_A, _B, _C, _D, _E], tmp_path / "n5_ABCDE.pt")
+    _mk_bundle([_A, _B, _C, _D, _F], tmp_path / "n5_ABCDF.pt")   # out E
+    real = _make_real(tmp_path)
+    out = tmp_path / "loo"
+    r = subprocess.run(
+        [sys.executable, "scripts/eval_real_loo.py",
+         "--bundles", str(tmp_path / "n5_ABCDE.pt"),
+         str(tmp_path / "n5_ABCDF.pt"), "--real", str(real),
+         "--config", str(_root / "configs" / "real_exp_n6.yaml"),
+         "--sweep-t-cutoff", "6", "12", "2", "--out-dir", str(out)],
+        cwd=str(_root), capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr[-800:]
+    assert (out / "loo_sweep.png").is_file()
+    import json
+    s = json.loads((out / "summary.json").read_text())
+    assert s["sweep"] is not None
+    bts, btc = s["sweep"]["best_window_s"]
+    assert 6.0 <= btc <= 12.0 and s["window_s"][1] == btc     # best cutoff used
